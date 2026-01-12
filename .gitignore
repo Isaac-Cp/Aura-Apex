@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+*.session
+*.db
+bot_stats.json
+bot_error.log
+*.log
