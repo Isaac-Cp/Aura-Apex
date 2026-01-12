@@ -1,0 +1,7 @@
+telethon
+flask
+gunicorn
+cryptg
+google-generativeai
+python-dotenv
+deep-translator

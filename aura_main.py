@@ -8,6 +8,8 @@ import datetime
 import json
 import os
 import csv
+from flask import Flask
+from threading import Thread
 from telethon import TelegramClient, events, functions, errors
 from telethon.tl.types import User, Channel, Chat, InputPeerChannel
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
@@ -83,6 +85,20 @@ else:
     ai_client = None
 
 # --- Persistence & Stats ---
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Aura Apex Supreme is Online! 🚀"
+
+def run():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
 
 def load_json(filename, default):
     if os.path.exists(filename):
@@ -360,6 +376,7 @@ async def main():
 
 if __name__ == '__main__':
     try:
+        keep_alive()
         client.loop.run_until_complete(main())
     except KeyboardInterrupt:
         print("\nElite Bot Stopped.")
