@@ -182,6 +182,7 @@ async def send_to_crm(lead_data):
     pass
 
 # Aura AI Generator
+_ai_sem = asyncio.Semaphore(2)
 async def generate_aura_message(group_name, user_problem):
     """Generates a specialized 'Human Boy' persona reply."""
     if not aura_model and not ai_client:
@@ -199,6 +200,7 @@ async def generate_aura_message(group_name, user_problem):
     5. NO LINKS in this message.
     """
     try:
+        await _ai_sem.acquire()
         if ai_client:
             def _work():
                 try:
@@ -217,6 +219,11 @@ async def generate_aura_message(group_name, user_problem):
     except Exception as e:
         logger.error(f"Aura Gen Error: {e}")
         return None
+    finally:
+        try:
+            _ai_sem.release()
+        except Exception:
+            pass
 
 # Auto-Greeting (Business Mode Emulation) - Now "Hot Lead" Detector
 @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))

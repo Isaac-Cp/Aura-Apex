@@ -1,9 +1,9 @@
 # Telegram IPTV Lead Gen Bot (2026 Pro Edition)
 
 ## Setup
-1. **Install Dependencies**: `pip install telethon cryptg python-dotenv`
-2. **Configuration**: Fill in `.env` with `API_ID`, `API_HASH`, and `PHONE_NUMBER`.
-3. **Run**: `python main.py`
+- Install: `python -m pip install -r requirements.txt`
+- Configuration: Create `.env` with `API_ID`, `API_HASH`, `PHONE_NUMBER`, optional `GEMINI_API_KEY`
+- Run locally: `python aura_main.py` (or any variant)
 
 ## Features
 - **Intent-Scoring**: Only alerts on high-quality leads (Score >= 2).
@@ -26,6 +26,12 @@ To avoid bans in 2026:
 ## Final Checklist
 - [ ] **Spam Check**: Message `@SpamBot` on Telegram to ensure no restrictions.
 - **VPS Deployment**: Use the systemd service described below for 24/7 uptime.
+
+## Koyeb Deployment
+- Ensure `.python-version` is `3.10.0`
+- Procfile: `web: python aura_main.py`
+- Health Check: HTTP, Port 8080, Path `/`
+- Environment: set `API_ID`, `API_HASH`, `PHONE_NUMBER`, `GEMINI_API_KEY`
 
 ## Persistence (VPS/Linux)
 Create `/etc/systemd/system/telegram_bot.service`:

@@ -49,6 +49,7 @@ CRM_FILE = 'crm_leads.csv'
 PERSONA_NAME = "Aiden"
 PERSONA_AGE = 19
 PERSONA_STYLE = "19yo tech enthusiast, casual, lowercase, empathetic, peer-to-peer."
+PERSONA_VERSION = "v1"
 
 # --- 1. Intent-Scoring Engine ---
 HIGH_INTENT = ['looking for', 'buying', 'trial', 'test line', 'recommend', 'subscription', 'provider link', 'service down', '24h trial', 'asap', 'today', 'right now']
@@ -155,7 +156,7 @@ async def generate_aura_pro_msg(group_name, problem, original_text):
     if not aura_model and not ai_client: return None
     
     prompt = f"""
-    You are {PERSONA_NAME}, a {PERSONA_AGE}yo tech enthusiast. Style: {PERSONA_STYLE}
+    Persona: {PERSONA_NAME} ({PERSONA_VERSION}). You are a {PERSONA_AGE}yo tech enthusiast. Style: {PERSONA_STYLE}
     Context: You saw a post in the group '{group_name}' about: "{problem}".
     
     Task: Write a short, casual outreach DM.
@@ -169,6 +170,7 @@ async def generate_aura_pro_msg(group_name, problem, original_text):
     - NO LINKS.
     """
     try:
+        await asyncio.sleep(0)  # yield
         if ai_client:
             def _work():
                 try:
