@@ -1,15 +1,23 @@
 
-import os
-from dotenv import load_dotenv
+from typing import Optional
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-load_dotenv()
+class Settings(BaseSettings):
+    API_ID: str
+    API_HASH: str
+    PHONE_NUMBER: str
+    GEMINI_API_KEY: Optional[str] = None
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False)
 
-API_ID = os.getenv("API_ID")
-API_HASH = os.getenv("API_HASH")
-PHONE_NUMBER = os.getenv("PHONE_NUMBER")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-# Validate that we have what we need
-if not API_ID or not API_HASH or not PHONE_NUMBER:
-    print("Error: Missing API_ID, API_HASH, or PHONE_NUMBER in .env file.")
-    # We don't exit here to allow main.py to handle it or prompt cleanly
+try:
+    _settings = Settings()
+    API_ID = _settings.API_ID
+    API_HASH = _settings.API_HASH
+    PHONE_NUMBER = _settings.PHONE_NUMBER
+    GEMINI_API_KEY = _settings.GEMINI_API_KEY
+except Exception as _e:
+    print("Error: Configuration invalid or missing keys in environment/.env.")
+    API_ID = None
+    API_HASH = None
+    PHONE_NUMBER = None
+    GEMINI_API_KEY = None

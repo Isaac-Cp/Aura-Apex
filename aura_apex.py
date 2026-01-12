@@ -1,6 +1,7 @@
 
 import asyncio
 import logging
+import logging
 import logging.handlers
 import random
 import sys
@@ -15,6 +16,8 @@ from telethon.tl.functions.channels import GetFullChannelRequest, JoinChannelReq
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
 from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings, ReactionEmoji
 from deep_translator import GoogleTranslator
+from flask import Flask
+from threading import Thread
 try:
     from google import genai as genai_new
     GENAI_PROVIDER = 'new'
@@ -32,6 +35,12 @@ except ImportError:
 # Logging
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+try:
+    _fh = logging.handlers.RotatingFileHandler('bot_error.log', maxBytes=1000000, backupCount=3, encoding='utf-8')
+    _fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(_fh)
+except Exception:
+    pass
 try:
     _fh = logging.handlers.RotatingFileHandler('bot_error.log', maxBytes=1000000, backupCount=3, encoding='utf-8')
     _fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
@@ -85,6 +94,20 @@ else:
     ai_client = None
 
 # --- Helpers ---
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Aura Apex Supreme is Online! 🚀"
+
+def run():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
 
 def load_json(path, default):
     if os.path.exists(path):
@@ -313,6 +336,7 @@ async def main():
 
 if __name__ == '__main__':
     try:
+        keep_alive()
         client.loop.run_until_complete(main())
     except KeyboardInterrupt:
         print("\nApex Bot Stopped.")

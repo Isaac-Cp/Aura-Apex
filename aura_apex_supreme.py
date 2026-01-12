@@ -11,6 +11,7 @@ import re
 import csv
 import sqlite3
 import time
+import socket
 from telethon import TelegramClient, events, functions, errors
 from telethon.tl.types import User, Channel, Chat, InputPeerChannel
 from telethon.tl.functions.messages import CheckChatInviteRequest, GetHistoryRequest, GetFullChatRequest
@@ -109,7 +110,7 @@ def save_json(path, data):
 
 # Database Persistence: SQLite
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS leads 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
@@ -120,6 +121,11 @@ def init_db():
                   quality_score INTEGER, 
                   status TEXT, 
                   timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    try:
+        c.execute("PRAGMA journal_mode=WAL;")
+        c.execute("PRAGMA synchronous=NORMAL;")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -186,6 +192,30 @@ def add_to_blacklist(user_id):
             f.write(f"{user_id},{datetime.datetime.now().isoformat()}\n")
     except Exception:
         pass
+
+async def proxy_health_monitor():
+    while True:
+        try:
+            if os.path.exists(PROXY_FILE):
+                with open(PROXY_FILE, 'r', encoding='utf-8') as f:
+                    line = next((l.strip() for l in f if l.strip()), None)
+                if line:
+                    parts = line.split(':')
+                    if len(parts) >= 2:
+                        host, port = parts[0], int(parts[1])
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(5)
+                        try:
+                            s.connect((host, port))
+                            s.close()
+                        except Exception:
+                            try:
+                                await client.send_message('me', f"⚠️ Proxy Health Check Failed: {host}:{port}")
+                            except Exception:
+                                pass
+            await asyncio.sleep(900) # 15 minutes
+        except Exception:
+            await asyncio.sleep(900)
 
 # --- Snippet Scoring Engine ---
 
@@ -496,6 +526,7 @@ async def main():
     client.loop.create_task(specialized_scouter_loop())
     client.loop.create_task(stats_report())
     client.loop.create_task(handshake_processor())
+    client.loop.create_task(proxy_health_monitor())
     
     await client.run_until_disconnected()
 

@@ -5,3 +5,6 @@ cryptg
 google-generativeai
 python-dotenv
 deep-translator
+google-genai
+pydantic
+pydantic-settings
