@@ -233,19 +233,22 @@ async def scouting_rotator():
         try:
             stats = load_json(STATS_FILE, apex_stats)
             
-            # Select Layer
             layers = list(KEYWORD_MATRIX.keys())
             layer = random.choice(layers)
-            keyword = random.choice(KEYWORD_MATRIX[layer])
+            base = random.choice(KEYWORD_MATRIX[layer])
+            hardware_terms = ["Firestick", "Formuler", "Mag", "Nvidia Shield", "BuzzTV"]
+            app_terms = ["Tivimate", "Smarters", "IBO Player", "XCIPTV", "OttNavigator"]
+            region_terms = ["UK", "USA", "Spain", "Italy", "Germany"]
+            q = f"{random.choice(hardware_terms)} {random.choice(app_terms)} {random.choice(region_terms)} {base}"
             
-            logger.info(f"Scouting Layer: {layer} | Query: {keyword}")
+            logger.info(f"Scouting Layer: {layer} | Query: {q}")
             
             bot = random.choice(SCOUT_BOTS)
             try:
-                await client.send_message(bot, keyword)
+                await client.send_message(bot, q)
                 stats["bots_queried"] += 1
-                if keyword not in stats["keywords_used"]:
-                    stats["keywords_used"].append(keyword)
+                if base not in stats["keywords_used"]:
+                    stats["keywords_used"].append(base)
                 save_json(STATS_FILE, stats)
             except Exception as e:
                 logger.error(f"Failed to query {bot}: {e}")

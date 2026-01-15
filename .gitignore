@@ -1,8 +1,22 @@
+# Python
 __pycache__/
 *.pyc
+.venv/
+
+# Env and secrets
 .env
-*.session
-*.db
+
+# Sessions and local state
+*.session*
+gold_leads.db
+supreme_stats.json
+supreme_groups.json
 bot_stats.json
+blacklist.txt
 bot_error.log
-*.log
+WAITING_FOR_CODE
+
+# OS/IDE
+.DS_Store
+.vscode/
+*.swp

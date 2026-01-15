@@ -8,10 +8,11 @@ import datetime
 import json
 import os
 from telethon import TelegramClient, events, functions, errors
-from telethon.tl.types import User, Channel, Chat, InputPeerChannel
+from telethon.tl.types import User
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
 from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings, ReactionEmoji
 from deep_translator import GoogleTranslator
+from groq import AsyncGroq
 try:
     from google import genai as genai_new
     GENAI_PROVIDER = 'new'
@@ -19,9 +20,8 @@ except Exception:
     GENAI_PROVIDER = 'old'
     import google.generativeai as genai_old
 
-# Import configuration
 try:
-    from config import API_ID, API_HASH, PHONE_NUMBER, GEMINI_API_KEY
+    from config import API_ID, API_HASH, PHONE_NUMBER, GEMINI_API_KEY, GROQ_API_KEY
 except ImportError:
     print("Error: Could not import config. Make sure config.py and .env represent a valid configuration.")
     sys.exit(1)
@@ -39,6 +39,7 @@ except Exception:
 # Constants
 SESSION_NAME = 'iptv_pro_session'
 STATS_FILE = 'bot_stats.json'
+MODE = os.getenv("AURA_MODE", "production").lower()
 
 # --- 1. Intent-Scoring Engine ---
 # High-Intent Words (+2 Points)
@@ -78,9 +79,31 @@ SEARCH_TERMS = [
 ]
 
 # JOINER SETTINGS & SAFETY (AURA EDITION)
-MAX_JOINS_PER_DAY = 12 # Reduced for stealth
-MIN_DELAY = 5400   # 90 minutes
-MAX_DELAY = 7200   # 120 minutes
+PROD_MAX_JOINS_PER_DAY = 12
+PROD_MIN_DELAY = 5400
+PROD_MAX_DELAY = 7200
+PROD_MIN_GROUP_SIZE = 50
+PROD_MIN_LEAD_SCORE = 2
+
+TEST_MAX_JOINS_PER_DAY = 3
+TEST_MIN_DELAY = 7200
+TEST_MAX_DELAY = 10800
+TEST_MIN_GROUP_SIZE = 100
+TEST_MIN_LEAD_SCORE = 3
+
+if MODE == "testing":
+    MAX_JOINS_PER_DAY = TEST_MAX_JOINS_PER_DAY
+    MIN_DELAY = TEST_MIN_DELAY
+    MAX_DELAY = TEST_MAX_DELAY
+    MIN_GROUP_SIZE = TEST_MIN_GROUP_SIZE
+    MIN_LEAD_SCORE = TEST_MIN_LEAD_SCORE
+else:
+    MAX_JOINS_PER_DAY = PROD_MAX_JOINS_PER_DAY
+    MIN_DELAY = PROD_MIN_DELAY
+    MAX_DELAY = PROD_MAX_DELAY
+    MIN_GROUP_SIZE = PROD_MIN_GROUP_SIZE
+    MIN_LEAD_SCORE = PROD_MIN_LEAD_SCORE
+
 FLOOD_SLEEP_THRESHOLD = 3600
 
 # Statistics & Dashboard
@@ -91,33 +114,37 @@ daily_stats = {
     "dms_sent": 0
 }
 
-# Initialize Client
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
-if GEMINI_API_KEY and "your_gemini_api_key_here" not in GEMINI_API_KEY:
+groq_client = None
+aura_model = None
+ai_client = None
+
+if GROQ_API_KEY:
+    try:
+        groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+        logging.info("Aura AI Engine Activated (Groq).")
+    except Exception as _e:
+        groq_client = None
+        logging.warning(f"Aura AI Groq init failed: {_e}")
+elif GEMINI_API_KEY and "your_gemini_api_key_here" not in GEMINI_API_KEY:
     if GENAI_PROVIDER == 'new':
         try:
             ai_client = genai_new.Client(api_key=GEMINI_API_KEY)
-            aura_model = None
             logging.info("Aura AI Engine Activated (genai).")
         except Exception as _e:
-            aura_model = None
             ai_client = None
-            logger.warning(f"Aura AI init failed (genai): {_e}")
+            logging.warning(f"Aura AI init failed (genai): {_e}")
     else:
         try:
             genai_old.configure(api_key=GEMINI_API_KEY)
             aura_model = genai_old.GenerativeModel('gemini-pro')
-            ai_client = None
             logging.info("Aura AI Engine Activated (generativeai).")
         except Exception as _e:
             aura_model = None
-            ai_client = None
-            logger.warning(f"Aura AI init failed (generativeai): {_e}")
+            logging.warning(f"Aura AI init failed (generativeai): {_e}")
 else:
-    aura_model = None
-    ai_client = None
-    logging.warning("Aura AI: No valid GEMINI_API_KEY found. Using fallback text.")
+    logging.warning("Aura AI: No valid AI provider found. Using fallback text.")
 
 def load_stats():
     """Loads daily stats from JSON to prevent restart loopholes."""
@@ -185,7 +212,7 @@ async def send_to_crm(lead_data):
 _ai_sem = asyncio.Semaphore(2)
 async def generate_aura_message(group_name, user_problem):
     """Generates a specialized 'Human Boy' persona reply."""
-    if not aura_model and not ai_client:
+    if not groq_client and not aura_model and not ai_client:
         return None # Fallback to manual response
     prompt = f"""
     You are a helpful, tech-savvy user on Telegram. You are NOT a seller. You are just a guy who solved a similar problem.
@@ -201,6 +228,15 @@ async def generate_aura_message(group_name, user_problem):
     """
     try:
         await _ai_sem.acquire()
+        if groq_client:
+            response = await groq_client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="llama-3.3-70b-versatile",
+            )
+            text = response.choices[0].message.content if response.choices else None
+            if text:
+                return text.lower().strip()
+            return None
         if ai_client:
             def _work():
                 try:
@@ -213,9 +249,10 @@ async def generate_aura_message(group_name, user_problem):
             if t:
                 return t.lower().strip()
             return None
-        else:
+        if aura_model:
             response = await aura_model.generate_content_async(prompt)
             return response.text.lower().strip()
+        return None
     except Exception as e:
         logger.error(f"Aura Gen Error: {e}")
         return None
@@ -236,7 +273,6 @@ async def handle_private_reply(event):
 
 @client.on(events.NewMessage(incoming=True))
 async def handle_new_message(event):
-    global daily_stats
     
     try:
         if event.is_private: return
@@ -265,9 +301,8 @@ async def handle_new_message(event):
                      lang_detected = 'foreign'
         except Exception as e: pass
 
-        # Scoring
         score = calculate_score(text)
-        if score < 2:
+        if score < MIN_LEAD_SCORE:
             return
 
         daily_stats['leads'] += 1
@@ -355,9 +390,7 @@ async def auto_joiner():
                     # BLOCKER 1: Broadcast Channel
                     if getattr(chat, 'broadcast', False): continue
                     
-                    # BLOCKER 2: Maturity Filter (Msg Count Check) -> Requires joining to see count reliably?
-                    # Telethon Check: chat.participants_count. If too low, skip.
-                    if hasattr(chat, 'participants_count') and chat.participants_count and chat.participants_count < 50:
+                    if hasattr(chat, 'participants_count') and chat.participants_count and chat.participants_count < MIN_GROUP_SIZE:
                         logger.info(f"Skipping {chat.title}: Too small ({chat.participants_count})")
                         continue
 
@@ -376,7 +409,10 @@ async def auto_joiner():
 
                     await client.send_message('me', f"🔮 **Aura Joiner**\nJoined: {chat.title}\nStats: {joins_today}/{MAX_JOINS_PER_DAY}")
                     
-                    delay = random.randint(MIN_DELAY, MAX_DELAY)
+                    if joins_today < 3:
+                        delay = random.randint(600, 1200)
+                    else:
+                        delay = random.randint(MIN_DELAY, MAX_DELAY)
                     logger.info(f"Sleeping for {delay}s...")
                     await asyncio.sleep(delay)
                     
@@ -427,6 +463,7 @@ async def conversational_ghost():
 
 async def main():
     print("Initializing Aura Client...")
+
     async def _start_with_retry():
         retries = 3
         delay = 5
@@ -441,22 +478,19 @@ async def main():
                 raise
         await asyncio.sleep(delay)
         await client.start(phone=PHONE_NUMBER)
+
     await _start_with_retry()
     print("🔮 Aura AI Lead Specialist Online.")
     print(f"Features: AI Persona, Smart Delay, Stealth Joiner ({MAX_JOINS_PER_DAY}/day).")
-    
-    client.loop.create_task(auto_joiner())
-    client.loop.create_task(conversational_ghost())
-    
+
+    asyncio.create_task(auto_joiner())
+    asyncio.create_task(conversational_ghost())
+
     await client.run_until_disconnected()
+
 
 if __name__ == '__main__':
     try:
-        client.loop.run_until_complete(main())
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\nBot stopped by user.")
-    finally:
-        try:
-            client.loop.run_until_complete(client.disconnect())
-        except Exception:
-            pass

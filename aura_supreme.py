@@ -1,8 +1,6 @@
 
 import asyncio
 import logging
-import logging
-import logging.handlers
 import random
 import sys
 import datetime
@@ -16,14 +14,7 @@ from telethon.tl.functions.channels import GetFullChannelRequest, JoinChannelReq
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
 from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings, ReactionEmoji
 from deep_translator import GoogleTranslator
-from flask import Flask
-from threading import Thread
-try:
-    from google import genai as genai_new
-    GENAI_PROVIDER = 'new'
-except Exception:
-    GENAI_PROVIDER = 'old'
-    import google.generativeai as genai_old
+import google.generativeai as genai
 
 # Configuration
 try:
@@ -35,18 +26,6 @@ except ImportError:
 # Logging
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
-try:
-    _fh = logging.handlers.RotatingFileHandler('bot_error.log', maxBytes=1000000, backupCount=3, encoding='utf-8')
-    _fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logger.addHandler(_fh)
-except Exception:
-    pass
-try:
-    _fh = logging.handlers.RotatingFileHandler('bot_error.log', maxBytes=1000000, backupCount=3, encoding='utf-8')
-    _fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logger.addHandler(_fh)
-except Exception:
-    pass
 
 # Constants
 SESSION_NAME = 'aura_supreme_session'
@@ -98,50 +77,22 @@ supreme_stats = {
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
 if GEMINI_API_KEY and "your_gemini_api_key_here" not in GEMINI_API_KEY:
-    if GENAI_PROVIDER == 'new':
-        try:
-            ai_client = genai_new.Client(api_key=GEMINI_API_KEY)
-            aura_model = None
-        except Exception:
-            ai_client = None
-            aura_model = None
-    else:
-        try:
-            genai_old.configure(api_key=GEMINI_API_KEY)
-            aura_model = genai_old.GenerativeModel('gemini-pro')
-            ai_client = None
-        except Exception:
-            ai_client = None
-            aura_model = None
+    genai.configure(api_key=GEMINI_API_KEY)
+    aura_model = genai.GenerativeModel('gemini-pro')
 else:
     aura_model = None
-    ai_client = None
 
 # --- Helpers ---
-
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Aura Apex Supreme is Online! 🚀"
-
-def run():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
 
 def load_json(path, default):
     if os.path.exists(path):
         try:
-            with open(path, 'r', encoding='utf-8') as f: return json.load(f)
+            with open(path, 'r') as f: return json.load(f)
         except: return default
     return default
 
 def save_json(path, data):
-    with open(path, 'w', encoding='utf-8') as f: json.dump(data, f)
+    with open(path, 'w') as f: json.dump(data, f)
 
 def is_prime_time():
     """Check if current local time is between 18:00 and 23:00."""
@@ -371,21 +322,7 @@ async def handle_new_lead(event):
 
 async def main():
     print("Initializing AURA SUPREME Infrastructure Engine (Phase 15)...")
-    async def _start_with_retry():
-        retries = 3
-        delay = 5
-        for _ in range(retries):
-            try:
-                await client.start(phone=PHONE_NUMBER)
-                return
-            except Exception as _e:
-                if 'database is locked' in str(_e).lower():
-                    await asyncio.sleep(delay)
-                    continue
-                raise
-        await asyncio.sleep(delay)
-        await client.start(phone=PHONE_NUMBER)
-    await _start_with_retry()
+    await client.start(phone=PHONE_NUMBER)
     print("💎 Aura Supreme Online. Refined Logic: Junk Shield & Prime-Time Sync Active.")
     
     client.loop.create_task(supreme_rotator())
@@ -395,12 +332,6 @@ async def main():
 
 if __name__ == '__main__':
     try:
-        keep_alive()
         client.loop.run_until_complete(main())
     except KeyboardInterrupt:
         print("\nSupreme Bot Stopped.")
-    finally:
-        try:
-            client.loop.run_until_complete(client.disconnect())
-        except Exception:
-            pass

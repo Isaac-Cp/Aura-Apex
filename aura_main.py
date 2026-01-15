@@ -1,20 +1,19 @@
 
 import asyncio
 import logging
-import logging.handlers
 import random
 import sys
 import datetime
 import json
 import os
 import csv
-from flask import Flask
-from threading import Thread
 from telethon import TelegramClient, events, functions, errors
 from telethon.tl.types import User, Channel, Chat, InputPeerChannel
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
 from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings, ReactionEmoji
 from deep_translator import GoogleTranslator
+from groq import AsyncGroq
+
 try:
     from google import genai as genai_new
     GENAI_PROVIDER = 'new'
@@ -22,34 +21,30 @@ except Exception:
     GENAI_PROVIDER = 'old'
     import google.generativeai as genai_old
 
-# Import configuration
 try:
-    from config import API_ID, API_HASH, PHONE_NUMBER, GEMINI_API_KEY
+    from config import API_ID, API_HASH, PHONE_NUMBER, GEMINI_API_KEY, GROQ_API_KEY
 except ImportError:
     print("Error: Could not import config. Make sure config.py and .env represent a valid configuration.")
     sys.exit(1)
 
 # Logging Setup
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
-try:
-    _fh = logging.handlers.RotatingFileHandler('bot_error.log', maxBytes=1000000, backupCount=3, encoding='utf-8')
-    _fh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    logger.addHandler(_fh)
-except Exception:
-    pass
 
 # Constants
 SESSION_NAME = 'aura_pro_elite'
 STATS_FILE = 'bot_stats.json'
 PROCESSED_LEADS_FILE = 'processed_leads.json'
 CRM_FILE = 'crm_leads.csv'
+MODE = os.getenv("AURA_MODE", "production").lower()
 
 # AI Persona Settings
 PERSONA_NAME = "Aiden"
 PERSONA_AGE = 19
 PERSONA_STYLE = "19yo tech enthusiast, casual, lowercase, empathetic, peer-to-peer."
-PERSONA_VERSION = "v1"
 
 # --- 1. Intent-Scoring Engine ---
 HIGH_INTENT = ['looking for', 'buying', 'trial', 'test line', 'recommend', 'subscription', 'provider link', 'service down', '24h trial', 'asap', 'today', 'right now']
@@ -62,68 +57,63 @@ HISTORICAL_KEYWORDS = ['freezing', 'down', 'expired', 'help', 'recommend', 'iptv
 # Search Terms
 SEARCH_TERMS = ["TiviMate Premium", "Smarters Pro Support", "IBO Player", "OttNavigator", "Firestick 4K Max", "Nvidia Shield TV", "UK Streaming Support", "USA Cord Cutters", "Premier League Live", "UFC PPV", "M3U Troubleshooting"]
 
-# Initialize Client
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
-if GEMINI_API_KEY and "your_gemini_api_key_here" not in GEMINI_API_KEY:
+groq_client = None
+aura_model = None
+ai_client = None
+
+if GROQ_API_KEY:
+    try:
+        groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+        logging.info("Aura AI Engine Activated (Groq).")
+    except Exception as _e:
+        groq_client = None
+        logging.warning(f"Aura AI Groq init failed: {_e}")
+elif GEMINI_API_KEY and "your_gemini_api_key_here" not in GEMINI_API_KEY:
     if GENAI_PROVIDER == 'new':
         try:
             ai_client = genai_new.Client(api_key=GEMINI_API_KEY)
-            aura_model = None
-        except Exception:
+            logging.info("Aura AI Engine Activated (genai).")
+        except Exception as _e:
             ai_client = None
-            aura_model = None
+            logging.warning(f"Aura AI init failed (genai): {_e}")
     else:
         try:
             genai_old.configure(api_key=GEMINI_API_KEY)
             aura_model = genai_old.GenerativeModel('gemini-pro')
-            ai_client = None
-        except Exception:
-            ai_client = None
+            logging.info("Aura AI Engine Activated (generativeai).")
+        except Exception as _e:
             aura_model = None
+            logging.warning(f"Aura AI init failed (generativeai): {_e}")
 else:
-    aura_model = None
-    ai_client = None
+    logging.warning("Aura AI: No valid AI provider found. Using fallback text.")
 
 # --- Persistence & Stats ---
-
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Aura Apex Supreme is Online! 🚀"
-
-def run():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
 
 def load_json(filename, default):
     if os.path.exists(filename):
         try:
-            with open(filename, 'r', encoding='utf-8') as f:
+            with open(filename, 'r') as f:
                 return json.load(f)
         except:
             return default
     return default
 
 def save_json(filename, data):
-    with open(filename, 'w', encoding='utf-8') as f:
+    with open(filename, 'w') as f:
         json.dump(data, f)
 
 def get_limits():
-    """Warm-up Protocol: Week 1 vs Week 2+"""
     stats = load_json(STATS_FILE, {"start_date": str(datetime.date.today()), "joins": 0})
     start_date = datetime.datetime.strptime(stats.get("start_date", str(datetime.date.today())), "%Y-%m-%d").date()
     days_active = (datetime.date.today() - start_date).days
     
+    if MODE == "testing":
+        return {"max_joins": 2, "max_dms": 3, "interval": (7200, 10800)}
     if days_active < 7:
-        return {"max_joins": 3, "max_dms": 5, "interval": (5400, 7200)} # Week 1
-    else:
-        return {"max_joins": 12, "max_dms": 25, "interval": (5400, 6300)} # Week 2+ (Elite)
+        return {"max_joins": 3, "max_dms": 5, "interval": (5400, 7200)}
+    return {"max_joins": 12, "max_dms": 25, "interval": (5400, 6300)}
 
 def record_dm_sent():
     stats = load_json(STATS_FILE, {"joins": 0, "dms_today": 0, "date": str(datetime.date.today())})
@@ -156,33 +146,50 @@ async def generate_aura_pro_msg(group_name, problem, original_text):
     if not aura_model and not ai_client: return None
     
     prompt = f"""
-    Persona: {PERSONA_NAME} ({PERSONA_VERSION}). You are a {PERSONA_AGE}yo tech enthusiast. Style: {PERSONA_STYLE}
+    You are {PERSONA_NAME}, a {PERSONA_AGE}yo tech enthusiast. Style: {PERSONA_STYLE}
     Context: You saw a post in the group '{group_name}' about: "{problem}".
     
     Task: Write a short, casual outreach DM.
+    Stylistic lock:
+    - Write like a tired IT professional.
+    - Use no emojis.
+    - Use lowercase frequently, allow occasional lowercase sentence starts.
+    - Start with a technical question about their specific error or symptom.
+    
     Rules:
-    - Reference that you saw their post "a while back" (since this is historical mining).
-    - mention the group name.
-    - lowercase sentence starts, casual punctuation.
-    - BE EMPATHETIC.
-    - HOOK: "found a crazy stable 4k setup recently and remembered ur post."
-    - END with a question: "did u ever fix that?" or "lmk if u still need help."
-    - NO LINKS.
+    - Reference that you saw their post "a while back" (historical mining).
+    - Mention the group name.
+    - Be empathetic but concise.
+    - Include a hook about having a stable 4k setup that solved the issue.
+    - End with a question inviting them to continue the chat.
+    - No links in the message.
     """
     try:
-        await asyncio.sleep(0)  # yield
+        if groq_client:
+            response = await groq_client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="llama-3.3-70b-versatile",
+            )
+            text = response.choices[0].message.content if response.choices else None
+            if text:
+                return text.strip()
+            return None
         if ai_client:
             def _work():
                 try:
                     r = ai_client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
                     return getattr(r, 'text', None)
-                except Exception:
+                except Exception as _e:
+                    logger.error(f"AI Error (genai): {_e}")
                     return None
             t = await asyncio.to_thread(_work)
-            return t.strip() if t else None
-        else:
+            if t:
+                return t.strip()
+            return None
+        if aura_model:
             response = await aura_model.generate_content_async(prompt)
             return response.text.strip()
+        return None
     except Exception as e:
         logger.error(f"AI Error: {e}")
         return None
@@ -324,8 +331,11 @@ async def auto_joiner():
                     logger.info(f"Joined {chat.title}. Total: {stats['joins']}/{limits['max_joins']}")
                     await client.send_message('me', f"🚀 **Aura Pro Join**\nJoined: {chat.title}\nLimit: {stats['joins']}/{limits['max_joins']}")
                     
-                    # Interval: 105 +/- 15 mins (approx)
-                    delay = random.randint(5400, 7200) # 90-120 mins
+                    if stats["joins"] < 3:
+                        delay = random.randint(600, 1200)
+                    else:
+                        low, high = limits["interval"]
+                        delay = random.randint(low, high)
                     await asyncio.sleep(delay)
                     
                     if stats["joins"] >= limits["max_joins"]: break
@@ -346,21 +356,7 @@ async def health_check():
 
 async def main():
     print("Initializing AURA PRO Elite...")
-    async def _start_with_retry():
-        retries = 3
-        delay = 5
-        for _ in range(retries):
-            try:
-                await client.start(phone=PHONE_NUMBER)
-                return
-            except Exception as _e:
-                if 'database is locked' in str(_e).lower():
-                    await asyncio.sleep(delay)
-                    continue
-                raise
-        await asyncio.sleep(delay)
-        await client.start(phone=PHONE_NUMBER)
-    await _start_with_retry()
+    await client.start(phone=PHONE_NUMBER)
     print("Aiden & The Time Traveler are Online.")
     
     # Ensure Stats file has start_date
@@ -370,20 +366,14 @@ async def main():
         save_json(STATS_FILE, stats)
     
     # Start tasks
-    client.loop.create_task(time_traveler())
-    client.loop.create_task(auto_joiner())
-    client.loop.create_task(health_check())
+    asyncio.create_task(time_traveler())
+    asyncio.create_task(auto_joiner())
+    asyncio.create_task(health_check())
     
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
     try:
-        keep_alive()
-        client.loop.run_until_complete(main())
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\nElite Bot Stopped.")
-    finally:
-        try:
-            client.loop.run_until_complete(client.disconnect())
-        except Exception:
-            pass

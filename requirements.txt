@@ -8,3 +8,6 @@ deep-translator
 google-genai
 pydantic
 pydantic-settings
+PySocks
+fake-useragent
+groq
