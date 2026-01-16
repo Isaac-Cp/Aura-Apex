@@ -23,7 +23,8 @@ from fake_useragent import UserAgent
 from groq import AsyncGroq
 
 # Custom modules
-from aura_core import proxy_health_monitor, should_outreach, load_json, save_json, keep_alive
+from aura_core import proxy_health_monitor, should_outreach, load_json, save_json
+from keep_alive import keep_alive
 from config import (
     API_ID, API_HASH, PHONE_NUMBER, GROQ_API_KEY,
     BANNED_ZONES, BANNED_CURRENCIES, JUNK_KEYWORDS, 
@@ -59,8 +60,7 @@ BLACKLIST_FILE = 'blacklist.txt'
 PROXY_FILE = 'proxy.txt'
 DB_FILE = 'gold_leads.db'
 
- 
- 
+
 # Specialized Scouters & Keyword Matrix
 SCOUTER_MISSIONS = {
     "Scouter 1 (Panels)": [
@@ -553,7 +553,7 @@ def should_scrape_now():
     w = lt.tm_wday
     general = (18 <= h <= 23) or (13 <= h <= 16)
     b2b = (9 <= h <= 17)
-    if w in [0,1,2,3,4]:
+    if w in [0, 1, 2, 3, 4]:
         return general or b2b
     return general
 
@@ -699,7 +699,6 @@ async def gatekeeper(chat_ref):
         logger.error(f"Gatekeeper error: {e}")
         return False, "Analysis Error"
 
- 
 
 async def user_discovery_loop():
     while True:
@@ -751,7 +750,6 @@ async def user_discovery_loop():
             logger.error(f"User discovery loop error: {e}")
             await asyncio.sleep(3600)
 
- 
 
 async def _click_button(message, text=None, index=None):
     try:
@@ -1517,8 +1515,7 @@ async def main():
                 await asyncio.sleep(3600)
     client.loop.create_task(qc_group_autojoin_loop())
     client.loop.create_task(qc_membership_verifier_loop())
- 
-    
+
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
