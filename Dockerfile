@@ -14,4 +14,6 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 
+EXPOSE 8080
+
 CMD ["python", "aura_apex_supreme.py"]
