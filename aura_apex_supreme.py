@@ -11,6 +11,7 @@ import sqlite3
 import time
 
 from telethon import TelegramClient, events, functions
+from telethon.sessions import StringSession
 from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
 from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
 from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest, GetFullChannelRequest
@@ -21,6 +22,7 @@ from telethon.errors import FloodWaitError, UserPrivacyRestrictedError, PeerIdIn
 from telethon.tl.functions.contacts import BlockRequest
 from fake_useragent import UserAgent
 from groq import AsyncGroq
+from deep_translator import GoogleTranslator
 
 # Custom modules
 from aura_core import proxy_health_monitor, should_outreach, load_json, save_json
@@ -432,6 +434,119 @@ def record_keyword_hits(text, converted=False):
     except Exception as e:
         logger.error(f"Keyword Record Error: {e}")
 
+def prospect_has_active_conversation(user_id):
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT 1 FROM prospects WHERE user_id = ? AND status IN ('responded','converted') LIMIT 1", (user_id,))
+        row = c.fetchone()
+        conn.close()
+        return bool(row)
+    except Exception as e:
+        logger.error(f"Prospect conversation check error: {e}")
+        return False
+
+def should_queue_handshake(user_id):
+    if user_opted_out(user_id):
+        return False
+    if prospect_has_active_conversation(user_id):
+        return False
+    return True
+
+def detect_language_from_bio(text):
+    if not text:
+        return "unknown"
+    try:
+        if re.search(r'[А-Яа-яЁё]', text):
+            return "ru"
+        return "latin"
+    except Exception:
+        return "unknown"
+
+def market_primary_language():
+    mk = os.environ.get("MARKET", "").lower()
+    if mk.startswith("en"):
+        return "en"
+    if mk.startswith("es"):
+        return "es"
+    if mk.startswith("it"):
+        return "it"
+    if mk.startswith("de"):
+        return "de"
+    if mk.startswith("fr"):
+        return "fr"
+    return "en"
+
+def detect_language_from_text(text):
+    try:
+        if not text:
+            return None
+        if re.search(r'[А-Яа-яЁё]', text):
+            return "ru"
+        return None
+    except Exception:
+        return None
+
+def choose_target_language(bio_text, snippet):
+    lang_text = detect_language_from_text(snippet or "")
+    if lang_text:
+        return lang_text
+    bio_lang = detect_language_from_bio(bio_text or "")
+    if bio_lang == "ru":
+        return "ru"
+    return market_primary_language()
+
+def translate_text(text, target_lang):
+    try:
+        if not text or not target_lang or target_lang == "en":
+            return text
+        return GoogleTranslator(source='auto', target=target_lang).translate(text)
+    except Exception as e:
+        logger.error(f"Translate error: {e}")
+        return text
+
+def ensure_spintax_variation(text, last_text=None):
+    try:
+        if not text:
+            return text
+        def jaccard(a, b):
+            if not a or not b:
+                return 0.0
+            sa = set(a.split())
+            sb = set(b.split())
+            inter = len(sa & sb)
+            union = len(sa | sb)
+            return (inter / union) if union else 0.0
+        sim = jaccard(text.lower(), (last_text or "").lower())
+        if sim <= 0.7:
+            return text
+        synonyms = {
+            "stable": ["rock-solid", "steady", "reliable"],
+            "trial": ["test line", "preview", "sample"],
+            "support": ["help", "assist", "backing"],
+            "streams": ["channels", "feeds", "lines"],
+            "details": ["info", "brief", "notes"],
+            "fix": ["solution", "patch", "tweak"],
+            "want": ["need", "keen", "open"],
+            "panel": ["backend", "portal", "console"],
+            "no-buffer": ["smooth", "lag-free", "clean"],
+            "catchup": ["replay", "timeshift", "backlog"]
+        }
+        def swap_words(t):
+            out = t
+            for k, vals in synonyms.items():
+                if k in out.lower():
+                    rep = random.choice(vals)
+                    out = re.sub(k, rep, out, flags=re.IGNORECASE)
+            return out
+        variant = swap_words(text)
+        if jaccard(variant.lower(), (last_text or "").lower()) <= 0.7:
+            return variant
+        extra = random.choice([" quick tip:", " heads-up:", " fyi:", " btw:"])
+        return (variant + extra)[:220]
+    except Exception:
+        return text
+
 # Stats Template
 apex_supreme_stats = {
     "rich_joined": 0,
@@ -472,7 +587,11 @@ if not API_ID or not API_HASH:
 # Explicit loop management for stability
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
-client = TelegramClient(SESSION_NAME, int(API_ID), API_HASH, proxy=get_proxy(), loop=loop)
+SESSION_STRING = (os.environ.get("SESSION_STRING") or "").strip()
+if SESSION_STRING:
+    client = TelegramClient(StringSession(SESSION_STRING), int(API_ID), API_HASH, proxy=get_proxy(), loop=loop)
+else:
+    client = TelegramClient(SESSION_NAME, int(API_ID), API_HASH, proxy=get_proxy(), loop=loop)
 apply_market_keywords()
 
 def _code_callback():
@@ -865,30 +984,10 @@ async def handle_v21_logic(event):
             update_prospect_status(user_id, "responded", opt_out=False, increment_response=True)
             record_keyword_hits(event.raw_text, converted=False)
             log_activity("inbound_dm", f"{user_id}:{event.raw_text[:140]}")
-        
-        # Turing-Test Auto-Reply
-        if ai_client and should_outreach():
-            prompt = (
-                "you are that boy — relaxed, human, street-smart persona. "
-                "initiate with helpful tech vibes, never sell. keep under 40 words, "
-                "mirror user language, and end with a short question. no links."
-            )
-            try:
-                # Groq Chat Completion
-                response = await ai_client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": event.raw_text}
-                    ],
-                    model="llama-3.3-70b-versatile",
-                )
-                response_text = response.choices[0].message.content
-                
-                if response_text:
-                    await typing_heartbeat(event.chat_id, random.uniform(5, 8))
-                    await event.reply(response_text.lower())
-            except Exception as e:
-                logger.error(f"AI Auto-Reply Error: {e}")
+        try:
+            await client.send_message('me', f"Lead replied. User: {user_id} | Msg: {event.raw_text[:140]}")
+        except Exception:
+            pass
         return
 
     if not event.is_private:
@@ -924,7 +1023,7 @@ async def handle_v21_logic(event):
         exp = watchlist.get(event.sender_id)
         if exp and now <= exp and s >= 10:
             user_id = event.sender_id
-            if user_id not in queued_handshakes:
+            if user_id not in queued_handshakes and should_queue_handshake(user_id):
                 group_title = getattr(event.chat, "title", "group")
                 queued_handshakes[user_id] = {
                     "msg_id": event.id,
@@ -940,7 +1039,7 @@ async def handle_v21_logic(event):
         # Potential Lead Handshake (Random selection)
         if (s >= 12 or any(val in text for val in TIER_1_INDICATORS)) and random.random() < 0.5:
             user_id = event.sender_id
-            if user_id not in queued_handshakes:
+            if user_id not in queued_handshakes and should_queue_handshake(user_id):
                 group_title = getattr(event.chat, "title", "group")
                 queued_handshakes[user_id] = {
                     "msg_id": event.id,
@@ -993,10 +1092,23 @@ async def handshake_processor():
                             continue
                         try:
                             fu = await client(GetFullUserRequest(u))
+                            uname = getattr(getattr(fu, "user", None), "username", None)
+                            if not uname:
+                                logger.info("Skipping DM (no username).")
+                                continue
+                            photo_ok = False
+                            try:
+                                photo_ok = bool(getattr(getattr(fu, "user", None), "photo", None) or getattr(getattr(fu, "full_user", None), "profile_photo", None))
+                            except Exception:
+                                photo_ok = False
+                            if not photo_ok:
+                                logger.info("Skipping DM (no profile photo).")
+                                continue
                             common = getattr(fu.full_user, "common_chats_count", 0)
                             if common <= 0:
                                 logger.info("Skipping DM (no mutual context).")
                                 continue
+                            lead_premium = bool(getattr(getattr(fu, "user", None), "premium", False))
                         except (UserPrivacyRestrictedError, PeerIdInvalidError):
                             logger.info("Skipping DM (privacy or invalid peer).")
                             continue
@@ -1100,6 +1212,20 @@ async def handshake_processor():
                             else:
                                 dm_text = "want a stable trial link? i can share privately."
 
+                        try:
+                            bio_text = getattr(getattr(fu, "full_user", None), "about", "") or ""
+                            target_lang = choose_target_language(bio_text, snippet)
+                            dm_text = translate_text(dm_text, target_lang)
+                        except Exception:
+                            pass
+                        try:
+                            stats = load_json(STATS_FILE, apex_supreme_stats)
+                            last_text = stats.get("last_dm_text")
+                            dm_text = ensure_spintax_variation(dm_text, last_text)
+                            stats["last_dm_text"] = dm_text
+                            save_json(STATS_FILE, stats)
+                        except Exception:
+                            pass
                         try:
                             await asyncio.sleep(random.randint(300, 420))
                             await client.send_message(u, dm_text)
@@ -1457,7 +1583,10 @@ async def main():
         delay = 5
         for _ in range(retries):
             try:
-                await client.start(phone=PHONE_NUMBER, code_callback=_code_callback, password=os.environ.get("TELEGRAM_PASSWORD"))
+                if SESSION_STRING:
+                    await client.start()
+                else:
+                    await client.start(phone=PHONE_NUMBER, code_callback=_code_callback, password=os.environ.get("TELEGRAM_PASSWORD"))
                 return
             except Exception as _e:
                 if 'database is locked' in str(_e).lower():
@@ -1466,7 +1595,10 @@ async def main():
                 logger.error(f"Connection Error: {_e}")
                 raise
         await asyncio.sleep(delay)
-        await client.start(phone=PHONE_NUMBER, code_callback=_code_callback, password=os.environ.get("TELEGRAM_PASSWORD"))
+        if SESSION_STRING:
+            await client.start()
+        else:
+            await client.start(phone=PHONE_NUMBER, code_callback=_code_callback, password=os.environ.get("TELEGRAM_PASSWORD"))
 
     await _start_with_retry()
     print("🏰 Fortress V2.1 Active: Handshake + Hardware Spoofing + Randomized Growth.")
