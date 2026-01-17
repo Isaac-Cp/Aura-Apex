@@ -475,6 +475,30 @@ asyncio.set_event_loop(loop)
 client = TelegramClient(SESSION_NAME, int(API_ID), API_HASH, proxy=get_proxy(), loop=loop)
 apply_market_keywords()
 
+def _code_callback():
+    try:
+        env_code = (os.environ.get("TELEGRAM_CODE") or "").strip()
+        if env_code:
+            return env_code
+        path = os.path.join(os.getcwd(), "WAITING_FOR_CODE")
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        code = (f.read() or "").strip()
+                    if code:
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+                        return code
+                except Exception:
+                    pass
+            time.sleep(2)
+    except Exception as e:
+        logger.error(f"Code callback error: {e}")
+    raise RuntimeError("Telegram login code not provided within timeout")
 def add_to_blacklist(user_id):
     try:
         with open(BLACKLIST_FILE, 'a', encoding='utf-8') as f:
@@ -1433,7 +1457,7 @@ async def main():
         delay = 5
         for _ in range(retries):
             try:
-                await client.start(phone=PHONE_NUMBER)
+                await client.start(phone=PHONE_NUMBER, code_callback=_code_callback, password=os.environ.get("TELEGRAM_PASSWORD"))
                 return
             except Exception as _e:
                 if 'database is locked' in str(_e).lower():
@@ -1442,7 +1466,7 @@ async def main():
                 logger.error(f"Connection Error: {_e}")
                 raise
         await asyncio.sleep(delay)
-        await client.start(phone=PHONE_NUMBER)
+        await client.start(phone=PHONE_NUMBER, code_callback=_code_callback, password=os.environ.get("TELEGRAM_PASSWORD"))
 
     await _start_with_retry()
     print("🏰 Fortress V2.1 Active: Handshake + Hardware Spoofing + Randomized Growth.")

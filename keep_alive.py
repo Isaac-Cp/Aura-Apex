@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, request
 from threading import Thread
 import os
 import logging
@@ -16,6 +16,24 @@ def home():
 @app.route('/health')
 def health():
     return "OK", 200
+
+@app.route('/code', methods=['POST'])
+def set_code():
+    try:
+        code = None
+        if request.is_json:
+            data = request.get_json(silent=True) or {}
+            code = (data.get("code") or "").strip()
+        else:
+            code = (request.form.get("code") or "").strip()
+        if not code:
+            return ("Missing code", 400)
+        path = os.path.join(os.getcwd(), "WAITING_FOR_CODE")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(code)
+        return ("OK", 200)
+    except Exception as e:
+        return (f"Error: {e}", 500)
 
 def run():
     try:
