@@ -62,6 +62,7 @@
 - Language: Detects Cyrillic or snippet language and translates with deep_translator.
 - Spintax: Ensures ≥30% difference vs last DM via synonym swaps and minor endings.
 - References: [compose](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L1159-L1213), [language helpers](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L480-L508), [spintax](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L485-L525)
+- Rebrand CTA: Briefly introduces app rebranding aligned to lead intent, explicitly mentioning visual branding (logo, color scheme). Ends with player question (e.g., TiviMate) to tie the rebrand to a concrete setup path. References: detection and injection [aura_apex_supreme.py:L1167-L1171](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L1167-L1171), persona prompts [aura_apex_supreme.py:L1172-L1188](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L1172-L1188), draft reinforcement [aura_apex_supreme.py:L1199-L1204](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L1199-L1204), non‑AI fallback [aura_apex_supreme.py:L1205-L1216](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L1205-L1216)
 
 ## Daily Caps & Throttling
 - Cap: 25 DMs if account is Premium, else 10

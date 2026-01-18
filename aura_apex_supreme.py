@@ -1164,27 +1164,39 @@ async def handshake_processor():
                         dm_text = None
                         persona_id = get_prospect_persona(u, chat_id) or choose_persona_id()
                         try:
+                            rebrand_focus = any(v.lower() in (snippet or "").lower() for v in REBRAND_INTENT)
+                            branding_line = (" we can rebrand the app with your logo and color scheme." if rebrand_focus 
+                                             else " i can match your brand (logo/colors) inside the app.")
                             if ai_client:
                                 if persona_id == "expert":
                                     prompt = (
                                         "You are Aiden (Expert). Calm tech specialist. "
                                         "Reference root cause (DNS/portal). Include brief service details "
                                         "(4K sports, catchup, anti-freeze). Add a tailored recommendation. "
-                                        "Keep under 60 words, no links. End with a helpful question. " f"Context: {social_hint}"
+                                        "Briefly introduce a rebrand option with visual branding (logo, color scheme). "
+                                        "Keep under 60 words, no links. "
+                                        "End with: “are you on tivimate or a different player? i have setup guides for both and can rebrand the app with your logo/colors.” "
+                                        f"Context: {social_hint}"
                                     )
                                 elif persona_id == "peer":
                                     prompt = (
                                         "You are Aiden (Peer). Casual friend vibe. "
                                         "Mention switching panels worked 10/10. Include brief service details "
                                         "(stable streams, 4K options, support). Tailor recommendations. "
-                                        "Keep under 60 words, no links. End with a helpful question. " f"Context: {social_hint}"
+                                        "Briefly introduce a rebrand option with visual branding (logo, color scheme). "
+                                        "Keep under 60 words, no links. "
+                                        "End with: “are you on tivimate or something else? i’ve got specific guides and can rebrand with your logo/colors.” "
+                                        f"Context: {social_hint}"
                                     )
                                 else:
                                     prompt = (
                                         "You are Aiden (Concise). Brief and direct. "
                                         "Offer a stable trial privately with short service details "
                                         "(no-buffer, sports, catchup). Tailor the recommendation. "
-                                        "Keep under 50 words, no links. End with a helpful question. " f"Context: {social_hint}"
+                                        "Briefly introduce a rebrand option with visual branding (logo, color scheme). "
+                                        "Keep under 50 words, no links. "
+                                        "End with: “are you using tivimate or another player? i can send the exact setup and rebrand with your logo/colors.” "
+                                        f"Context: {social_hint}"
                                     )
                                 user_msg = f"Quoted from {group_title}: \"{snippet}\""
                                 resp = await ai_client.chat.completions.create(
@@ -1200,20 +1212,25 @@ async def handshake_processor():
                                 # Hard cap length
                                 if len(dm_text) > 220:
                                     dm_text = dm_text[:220]
+                                if ("logo" not in dm_text.lower()) and ("color" not in dm_text.lower()):
+                                    dm_text = (dm_text + branding_line).strip()
                             else:
                                 if persona_id == "expert":
                                     base = f"saw your note in {group_title}. likely dns/portal handshake."
                                     proof = f" {social_hint}" if social_hint else ""
                                     svc = " 4k sports, catchup, anti-freeze available."
-                                    dm_text = f"{base}{proof}{svc} want me to share the fix?"
+                                    cta = " are you on tivimate or a different player? i have specific guides and can rebrand the app with your logo and color scheme."
+                                    dm_text = f"{base}{proof}{svc}{cta}"
                                 elif persona_id == "peer":
                                     base = f"same thing happened in {group_title} last week."
                                     proof = f" {social_hint}" if social_hint else ""
                                     svc = " stable streams with 4k options and support."
-                                    dm_text = f"{base}{proof}{svc} i switched panels and it’s been 10/10. want details?"
+                                    cta = " are you on tivimate or something else? i can share the exact setup and rebrand with your logo and color palette."
+                                    dm_text = f"{base}{proof}{svc}{cta}"
                                 else:
                                     svc = " no-buffer line, sports, catchup."
-                                    dm_text = f"still need a stable trial from the group? {svc} can send info—want it?"
+                                    cta = " using tivimate or another player? i can send the setup for yours and handle rebranding with your logo/colors."
+                                    dm_text = f"still need a stable trial from the group?{svc}{cta}"
                         except Exception as e:
                             logger.error(f"Groq DM compose error: {e}")
                             if persona_id == "expert":
