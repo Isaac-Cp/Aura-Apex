@@ -1,48 +1,110 @@
-# Telegram IPTV Lead Gen Bot (2026 Pro Edition)
+# Aura Apex Supreme Telegram Bot
 
-## Setup
-1. **Install Dependencies**: `pip install telethon cryptg python-dotenv google-genai google-generativeai groq`
-2. **Configuration**: Fill in `.env` with `API_ID`, `API_HASH`, `PHONE_NUMBER`, and optionally `GROQ_API_KEY`.
-3. **Run (Production Mode)**: `python main.py`
-4. **Run (Conservative Testing Mode)**: set `AURA_MODE=testing` in the environment before starting.
+## Overview
+- Purpose: Discover high‑intent leads in groups and send compliant, context‑aware DMs.
+- Core strategy: Scout‑then‑Strike with strict qualification gates and anti‑ban safeguards.
+- Login: Persistent via Telethon StringSession; no interactive codes required in production.
 
-## Features
-- **AI Engine**: Uses Groq as the primary provider (with Gemini as a fallback when configured).
-- **Intent-Scoring**: Only alerts on high-quality leads (Score >= 2 in production; higher in testing mode).
-- **Golden Lead Filter**: Marks urgent leads (asap, today) with 🔴.
-- **High-Traffic Flag**: Marks leads during prime time/weekends with ⚡.
-- **Auto-Discovery**: Safely joins 5 relevant groups/day.
-- **Conversational Ghost**: Auto-reacts to messages to maintain "Human" status.
+## Architecture
+- Entrypoint: [aura_apex_supreme.py](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py)
+- Support:
+  - Config & env: [config.py](file:///c:/Users/owner/Desktop/Telegram%20Bot/config.py)
+  - Utilities & state: [aura_core.py](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_core.py)
+  - Keep‑alive web server: [keep_alive.py](file:///c:/Users/owner/Desktop/Telegram%20Bot/keep_alive.py)
+  - Session generator (local): [session_gen.py](file:///c:/Users/owner/Desktop/Telegram%20Bot/session_gen.py)
+- Deployment:
+  - Dockerfile builder: [Dockerfile](file:///c:/Users/owner/Desktop/Telegram%20Bot/Dockerfile)
+  - Web service command: [Procfile](file:///c:/Users/owner/Desktop/Telegram%20Bot/Procfile)
 
-## Professional Lead Response (The 2026 Script)
-When you receive an alert, **do not** send a generic spam message. Use this "Community Member" approach:
+## Environment
+- .env keys:
+  - API_ID, API_HASH, PHONE_NUMBER
+  - SESSION_STRING (recommended; generated locally, pasted in server env)
+  - GROQ_API_KEY (optional, AI composing)
+  - MARKET (optional: en-UK, en-US, es-ES, it-IT, de-DE, fr-FR)
+- Koyeb:
+  - Set env in Service → Settings → Environment variables and files
+  - Exposed port: 8080
 
-> "Hey [Name]! I just saw your message in the [Group Name] group. I’m also a member there. I actually went through the same struggle with [Problem mentioned] until I switched to a stable 4K setup. If you're still looking, I can get you a trial line to test for tonight's game. No pressure, just happy to help a fellow group member!"
+## Login Flow
+- Prefers SESSION_STRING:
+  - Client init switches to `StringSession(SESSION_STRING)` if present
+  - Start: `await client.start()` (no code)
+- Fallback (local/dev):
+  - Phone + `_code_callback` reading `WAITING_FOR_CODE` or TELEGRAM_CODE
+- References: [init & start](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L466-L477), [file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L1455-L1470]
 
-## Reputation & Safety Protocol
-To avoid bans in 2026:
-- **Warm-Up**: For the first week, manually reply to 2-3 normal discussions for every group the bot joins.
-- **Profile**: Ensure you have a professional Bio (e.g., "Streaming Consultant") and a real Profile Picture.
-- **Privacy**: Hide your Phone Number in Telegram Settings.
+## Keep‑Alive Web Server
+- Flask app for health and login code submission
+  - `/` returns a status string
+  - `/health` returns 200; use for uptime monitors
+  - `/code` accepts POSTed login codes when not using SESSION_STRING
+- References: [keep_alive.py](file:///c:/Users/owner/Desktop/Telegram%20Bot/keep_alive.py)
 
-## Final Checklist
-- [ ] **Spam Check**: Message `@SpamBot` on Telegram to ensure no restrictions.
-- **VPS Deployment**: Use the systemd service described below for 24/7 uptime.
+## Discovery & Queuing
+- Listens to group messages; scores intent using keyword matrices and market additions.
+- Queues a handshake for high intent or urgency with a human‑like delay (5–15 min).
+- References: [watchlist/handshake queue](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L1016-L1052)
 
-## Persistence (VPS/Linux)
-Create `/etc/systemd/system/telegram_bot.service`:
-```ini
-[Unit]
-Description=Telegram IPTV Bot
-After=network.target
+## Qualification Gates
+- Required before DM:
+  - @username present
+  - Profile photo present
+  - Mutual groups count ≥1 (contextual DM)
+  - Last seen “Recently” or within 4 days
+  - Not opted out; not in active conversation
+  - Human hours window 09:00–21:00 local; below daily cap
+- References: [gates](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L1094-L1140)
 
-[Service]
-User=root
-WorkingDirectory=/path/to/bot
-ExecStart=/usr/bin/python3 main.py
-Restart=always
-RestartSec=10
+## DM Compose & Language
+- Persona: expert / peer / concise; AI via Groq when configured, else curated templates.
+- Context: References group title and recent chatter (problems/competitors).
+- Language: Detects Cyrillic or snippet language and translates with deep_translator.
+- Spintax: Ensures ≥30% difference vs last DM via synonym swaps and minor endings.
+- References: [compose](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L1159-L1213), [language helpers](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L480-L508), [spintax](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L485-L525)
 
-[Install]
-WantedBy=multi-user.target
-```
+## Daily Caps & Throttling
+- Cap: 25 DMs if account is Premium, else 10
+- Human‑like pacing between DMs: 15–20 minutes
+- FloodWait handling with backoff
+- References: [cap logic](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L1085-L1092)
+
+## Human Handoff
+- On private reply:
+  - Marks conversation responded/converted
+  - Alerts “me” to take over; stops automated replies for that lead
+- References: [inbound DM handler](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L956-L991)
+
+## Commands
+- /health: status report
+- /sleep <hours>: pause outreach
+- /reset_persona: refresh persona hooks
+- /export: send the SQLite DB to “Saved Messages”
+- References: [commands](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L1143-L1189)
+
+## Data & Persistence
+- SQLite tables:
+  - leads, joined_groups, prospects, keywords, activity_log
+- JSON stats: `supreme_stats.json` tracks counters and QC groups
+- References: [DB init](file:///c:/Users/owner/Desktop/Telegram%20Bot/aura_apex_supreme.py#L238-L296)
+
+## Deployment (Koyeb)
+- Source: GitHub with Dockerfile builder
+- Web service listens on 8080; health routed to `/health`
+- Free tier considerations:
+  - Scale‑to‑zero on idle traffic; keep alive via external uptime monitor hitting `/health`
+- References: [Dockerfile](file:///c:/Users/owner/Desktop/Telegram%20Bot/Dockerfile), [Procfile](file:///c:/Users/owner/Desktop/Telegram%20Bot/Procfile)
+
+## Troubleshooting
+- “Deep sleep”: add uptime monitor every 5 minutes to `/health`
+- “Privacy forbids DM”: gate logs “privacy/invalid peer” and skips
+- FloodWait: automatic backoff and retry
+
+## Security
+- Do not commit secrets; use env variables in Koyeb settings
+- SESSION_STRING is sensitive; treat it like a password
+
+## Local Session Generation
+- Run: `python session_gen.py` locally
+- Submit login code via `/code` or TELEGRAM_CODE env; copy printed SESSION_STRING
+- References: [session_gen.py](file:///c:/Users/owner/Desktop/Telegram%20Bot/session_gen.py)
