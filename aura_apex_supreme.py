@@ -25,7 +25,7 @@ from groq import AsyncGroq
 from deep_translator import GoogleTranslator
 
 # Custom modules
-from aura_core import proxy_health_monitor, should_outreach, load_json, save_json
+from aura_core import proxy_health_monitor, should_outreach, load_json, save_json, clean_old_logs
 from keep_alive import keep_alive
 from config import (
     API_ID, API_HASH, PHONE_NUMBER, GROQ_API_KEY,
@@ -505,6 +505,21 @@ def translate_text(text, target_lang):
         logger.error(f"Translate error: {e}")
         return text
 
+def market_hour_ok():
+    mk = (os.environ.get("MARKET") or "").lower()
+    offsets = {
+        "en-uk": 0,
+        "en-us": -5,
+        "es-es": 1,
+        "it-it": 1,
+        "de-de": 1,
+        "fr-fr": 1
+    }
+    off = offsets.get(mk, 0)
+    now_utc = datetime.datetime.utcnow()
+    h = (now_utc + datetime.timedelta(hours=off)).hour
+    return 9 <= h <= 21
+
 def ensure_spintax_variation(text, last_text=None):
     try:
         if not text:
@@ -566,13 +581,10 @@ def get_proxy():
             with open(PROXY_FILE, 'r', encoding='utf-8') as f:
                 lines = [line.strip() for line in f if line.strip()]
                 if lines:
-                    p = lines[0].split(':')
+                    chosen = random.choice(lines)
+                    p = chosen.split(':')
                     if len(p) == 4:
                         import socks
-                        # Set System Timezone to match proxy (Simulation)
-                        os.environ['TZ'] = 'Europe/London' # Example: UK Primary Target
-                        if hasattr(time, 'tzset'): 
-                            time.tzset()
                         return (socks.SOCKS5, p[0], int(p[1]), True, p[2], p[3])
         except Exception as e:
             logger.error(f"Proxy Load Error: {e}")
@@ -1077,8 +1089,7 @@ async def handshake_processor():
                         if user_opted_out(u):
                             logger.info("Skipping DM (user opted out).")
                             continue
-                        hour = time.localtime().tm_hour
-                        if hour < 9 or hour > 21:
+                        if not market_hour_ok():
                             logger.info("Skipping DM (outside human hours).")
                             continue
                         stats = load_json(STATS_FILE, apex_supreme_stats)
@@ -1227,6 +1238,12 @@ async def handshake_processor():
                         except Exception:
                             pass
                         try:
+                            await client.send_read_acknowledge(u)
+                            try:
+                                async with client.action(u, 'typing'):
+                                    await asyncio.sleep(random.randint(5, 8))
+                            except Exception:
+                                await typing_heartbeat(u, random.uniform(6, 9))
                             await asyncio.sleep(random.randint(300, 420))
                             await client.send_message(u, dm_text)
                             update_prospect_status(u, "contacted", opt_out=False, increment_response=False)
@@ -1620,6 +1637,14 @@ async def main():
     asyncio.create_task(proxy_health_monitor(client, PROXY_FILE))
     asyncio.create_task(noise_generation_loop())
     asyncio.create_task(prune_dead_chats_loop())
+    async def db_cleanup_loop():
+        while True:
+            try:
+                clean_old_logs(DB_FILE, days=7)
+                await asyncio.sleep(43200)
+            except Exception:
+                await asyncio.sleep(3600)
+    asyncio.create_task(db_cleanup_loop())
     async def qc_group_autojoin_loop():
         while True:
             try:

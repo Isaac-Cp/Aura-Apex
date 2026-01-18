@@ -4,6 +4,8 @@ import logging
 import os
 import random
 import time
+import sqlite3
+import sqlite3
 
 logger = logging.getLogger(__name__)
 
@@ -51,3 +53,36 @@ def keep_alive():
     except Exception:
         pass
 
+def clean_old_logs(db_path, days=7):
+    try:
+        conn = sqlite3.connect(db_path, timeout=30)
+        c = conn.cursor()
+        try:
+            c.execute("DELETE FROM prospects WHERE message_ts < datetime('now', ?)", (f'-{int(days)} days',))
+        except Exception:
+            pass
+        try:
+            c.execute("DELETE FROM activity_log WHERE ts < datetime('now', ?)", (f'-{int(days)} days',))
+        except Exception:
+            pass
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"DB Cleanup Error: {e}")
+
+def clean_old_logs(db_path, days=7):
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        try:
+            c.execute("DELETE FROM prospects WHERE datetime(message_ts) < datetime('now', ?)", (f'-{int(days)} days',))
+        except Exception:
+            pass
+        try:
+            c.execute("DELETE FROM activity_log WHERE datetime(ts) < datetime('now', ?)", (f'-{int(days)} days',))
+        except Exception:
+            pass
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Cleanup Error: {e}")
