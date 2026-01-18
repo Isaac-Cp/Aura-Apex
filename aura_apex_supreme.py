@@ -872,7 +872,15 @@ async def user_discovery_loop():
                 await asyncio.sleep(600)
                 continue
             # Warm-up phase: read-only before joining groups
-            warmup_window = 900 if os.environ.get("AURA_MODE", "").lower() == "testing" else 86400
+            # Warm-up configurable via env; skip if SKIP_WARMUP=1
+            if os.environ.get("SKIP_WARMUP", "0") == "1":
+                warmup_window = 0
+            else:
+                default_warmup = 900 if os.environ.get("AURA_MODE", "").lower() == "testing" else 86400
+                try:
+                    warmup_window = int(os.environ.get("AURA_WARMUP_SECONDS", str(default_warmup)))
+                except Exception:
+                    warmup_window = default_warmup
             if now_ts - warm_start < warmup_window:
                 await asyncio.sleep(1800)
                 continue

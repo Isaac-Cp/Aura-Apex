@@ -25,6 +25,10 @@
 - Koyeb:
   - Set env in Service → Settings → Environment variables and files
   - Exposed port: 8080
+  - Optional tuning:
+    - QC_GROUP_LINK: seed group invite/link to ensure at least one QC group is joined
+    - AURA_WARMUP_SECONDS: warm‑up period before joining groups (default 86400 in prod, 900 in testing)
+    - SKIP_WARMUP: set to 1 to disable warm‑up entirely (immediate joining)
 
 ## Login Flow
 - Prefers SESSION_STRING:
