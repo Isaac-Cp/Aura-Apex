@@ -11,6 +11,8 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 CURATOR_CHANNEL_ID = os.getenv("CURATOR_CHANNEL_ID")
+TARGET_CHANNEL_ID = os.getenv("TARGET_CHANNEL_ID")
+CHANNEL_INVITE_LINK = os.getenv("CHANNEL_INVITE_LINK")
 
 BANNED_ZONES = [
     "AF", "AL", "DZ", "AO", "BY", "BO", "VG", "BF", "BI", "CM", "CF", "TD", "CU", "CD",

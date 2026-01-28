@@ -13,3 +13,4 @@ fake-useragent
 groq
 requests
 beautifulsoup4
+pillow

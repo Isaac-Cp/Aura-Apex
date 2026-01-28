@@ -1,11 +1,40 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+
+# Virtual env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
 *.log
-*.session
-.env
-gold_leads.db
-supreme_stats.json
-supreme_groups.json
-supreme_leads.json
 bot_error.log
+log_dump.txt
+
+# Telethon sessions
+*.session
+*.session-journal
+WAITING_FOR_CODE
+
+# Secrets and local config
+.env
+
+# Runtime databases and caches
+gold_leads.db
+
+# Local data persistence
+data/
+
+# Branding assets (keep private unless explicitly added)
+brand/ax_logo.png
