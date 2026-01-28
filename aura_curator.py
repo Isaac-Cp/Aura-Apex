@@ -34,7 +34,10 @@ ai_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 IPTV_FILTER_KEYWORDS = [
     "iptv", "tivimate", "smarters", "apk", "firestick",
-    "buffering", "dns", "m3u", "rebrand", "player", "epg"
+    "buffering", "dns", "m3u", "rebrand", "player", "epg",
+    "xtream codes", "hardcoded", "ott navigator", "implayer", "sparkle",
+    "nvidia shield", "formuler", "mag box", "android tv",
+    "reseller", "panel", "credits", "white label", "billing"
 ]
 
 def is_iptv_content(title: str, description: str = "") -> bool:
@@ -128,7 +131,8 @@ async def humanize_post(source: str, title: str) -> str:
     if not ai_client:
         return base + "pro tip: check player EPG refresh before any cache wipes."
     user_msg = (
-        f"Rewrite this headline for IPTV specialists: {title}. "
+        f"Rewrite this for IPTV specialists: {title}. "
+        f"Focus on server-side realities like bitrate caps, ISP throttling, and handshake behavior versus router rebooting. "
         f"Explain why this fix beats clearing cache. Add one concrete Pro Tip. Mention {source}."
     )
     try:
@@ -160,16 +164,68 @@ async def load_recent_links(client: TelegramClient, channel_id: int) -> set:
         pass
     return seen
 
+PRO_TIPS = [
+    "Tip: Switch to hardware decoder in player settings to stop 4K stuttering.",
+    "Tip: If ISP blocks the portal, try a Netherlands VPN exit for stability.",
+    "Tip: Keep EPG refresh at 24h; over-refreshing can trigger provider rate-limits.",
+    "Tip: Use wired Ethernet for 4K; Wi‑Fi spikes add jitter even at 5GHz."
+]
+
+def get_random_pro_tip() -> str:
+    import random
+    return "\n\n💡 Aiden's Pro-Tip: " + random.choice(PRO_TIPS)
+
+def local_store_enabled() -> bool:
+    v = os.environ.get("PERSIST_POSTS", "").strip().lower()
+    if v in ("1", "true", "yes"):
+        try:
+            os.makedirs("data", exist_ok=True)
+        except Exception:
+            pass
+        return True
+    try:
+        os.makedirs("data", exist_ok=True)
+        return True
+    except Exception:
+        return False
+
+def load_local_links() -> set:
+    s = set()
+    if not local_store_enabled():
+        return s
+    p = os.path.join("data", "posted_links.json")
+    try:
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8") as f:
+                for q in (f.read().splitlines() or []):
+                    if q.strip():
+                        s.add(q.strip())
+    except Exception:
+        return s
+    return s
+
+def append_local_link(link: str) -> None:
+    if not local_store_enabled():
+        return
+    p = os.path.join("data", "posted_links.json")
+    try:
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(link.strip() + "\n")
+    except Exception:
+        pass
+
 async def post_to_channel(client: TelegramClient, channel_id: int, source: str, title: str, link: str):
     try:
         body = await humanize_post(source, title)
-        suffix = f"\nSource: {source} | {link}"
-        text = f"{body}{suffix}"
+        tip = get_random_pro_tip()
+        suffix = f"\n\n🔗 Source: {source} | {link}"
+        text = f"{body}{tip}{suffix}"
         await client.send_message(channel_id, text)
         try:
             await client.send_message('me', f"[Curator] Posted: {link}")
         except Exception:
             pass
+        append_local_link(link)
         return True
     except FloodWaitError as e:
         await asyncio.sleep(int(getattr(e, "seconds", 60)))
@@ -233,6 +289,7 @@ async def curator_loop():
     client = TelegramClient(session or "aura_curator_session", int(API_ID), API_HASH)
     async with client:
         seen = await load_recent_links(client, channel_id)
+        seen |= load_local_links()
         while True:
             try:
                 today_count = await count_today_posts(client, channel_id)
@@ -243,6 +300,8 @@ async def curator_loop():
                     new_items.extend(scrape_aftvnews())
                     new_items.extend(scrape_torrentfreak())
                     new_items.extend(scrape_reddit_detailediptv())
+                    new_items.extend(scrape_reddit_tivimate())
+                    new_items.extend(scrape_reddit_iptv())
                     for title, link, source in new_items:
                         if today_count >= 3:
                             break
