@@ -14,3 +14,4 @@ groq
 requests
 beautifulsoup4
 pillow
+aiosqlite

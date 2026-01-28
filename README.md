@@ -58,6 +58,7 @@ Short, human-like Telegram outreach for IPTV leads using:
 - `cryptg` enabled if present for C-based encryption acceleration
 - Entity saving disabled to reduce SQLite overhead (`client.session.save_entities = False`)
 - Lowered fetch limits and static UA fallback reduce CPU and I/O
+ - Batched write queue using `aiosqlite` minimizes blocking database operations
  
 ## Notes
 - `.gitignore` excludes `.env`, DB, session files, and runtime stats

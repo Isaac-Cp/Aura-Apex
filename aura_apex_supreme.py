@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import time
+import aiosqlite
 
 from telethon import TelegramClient, events, functions
 from telethon.sessions import StringSession
@@ -382,58 +383,48 @@ def migrate_db():
 
 def save_lead_to_db(link, title, members, tech_score, quality_score, status):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO leads (link, group_title, members, tech_score, quality_score, status) VALUES (?, ?, ?, ?, ?, ?)",
-                  (link, title, members, tech_score, quality_score, status))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"DB Save Error: {e}")
+        DB_QUEUE.put_nowait((
+            "INSERT OR REPLACE INTO leads (link, group_title, members, tech_score, quality_score, status) VALUES (?, ?, ?, ?, ?, ?)",
+            (link, title, members, tech_score, quality_score, status)
+        ))
+    except Exception:
+        pass
 
 def log_activity(event_type, details):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        c = conn.cursor()
-        c.execute("INSERT INTO activity_log (type, details) VALUES (?, ?)", (event_type, details[:1000]))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Activity Log Error: {e}")
+        DB_QUEUE.put_nowait((
+            "INSERT INTO activity_log (type, details) VALUES (?, ?)",
+            (event_type, (details or "")[:1000])
+        ))
+    except Exception:
+        pass
 
 def record_joined_group(group_id, title, username, link):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        c = conn.cursor()
-        c.execute("""INSERT OR IGNORE INTO joined_groups (group_id, title, username, link) 
-                     VALUES (?, ?, ?, ?)""", (group_id, title, username, link))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Joined Group Save Error: {e}")
+        DB_QUEUE.put_nowait((
+            "INSERT OR IGNORE INTO joined_groups (group_id, title, username, link) VALUES (?, ?, ?, ?)",
+            (group_id, title, username, link)
+        ))
+    except Exception:
+        pass
 
 def mark_group_banned(group_id):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        c = conn.cursor()
-        c.execute("UPDATE joined_groups SET banned = 1 WHERE group_id = ?", (group_id,))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Group Ban Mark Error: {e}")
+        DB_QUEUE.put_nowait((
+            "UPDATE joined_groups SET banned = 1 WHERE group_id = ?",
+            (group_id,)
+        ))
+    except Exception:
+        pass
 
 def save_prospect(user_id, username, message, message_id, message_ts, group_id, group_title, persona_id, status):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        c = conn.cursor()
-        c.execute("""INSERT OR IGNORE INTO prospects 
-                     (user_id, username, message, message_id, message_ts, group_id, group_title, persona_id, status) 
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                  (user_id, username, message, message_id, message_ts, group_id, group_title, persona_id, status))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Prospect Save Error: {e}")
+        DB_QUEUE.put_nowait((
+            "INSERT OR IGNORE INTO prospects (user_id, username, message, message_id, message_ts, group_id, group_title, persona_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, username, message, message_id, message_ts, group_id, group_title, persona_id, status)
+        ))
+    except Exception:
+        pass
 
 def choose_persona_id():
     return random.choice(["expert", "peer", "concise"])
@@ -451,8 +442,6 @@ def get_prospect_persona(user_id, group_id):
         return None
 def update_prospect_status(user_id, status, opt_out=False, increment_response=False):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        c = conn.cursor()
         fields = []
         params = []
         fields.append("status = ?")
@@ -464,11 +453,9 @@ def update_prospect_status(user_id, status, opt_out=False, increment_response=Fa
         fields.append("last_contacted_ts = CURRENT_TIMESTAMP")
         q = "UPDATE prospects SET " + ", ".join(fields) + " WHERE user_id = ?"
         params.append(user_id)
-        c.execute(q, tuple(params))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Prospect Status Update Error: {e}")
+        DB_QUEUE.put_nowait((q, tuple(params)))
+    except Exception:
+        pass
 
 def user_opted_out(user_id):
     try:
@@ -489,28 +476,23 @@ def get_responses_count(user_id):
         row = c.fetchone()
         conn.close()
         return int(row[0]) if row and row[0] is not None else 0
-    except Exception as e:
-        logger.error(f"Get responses count error: {e}")
+    except Exception:
         return 0
 
 def record_keyword_hits(text, converted=False):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        c = conn.cursor()
-        lower = text.lower()
+        lower = (text or "").lower()
         terms = []
         for k in BUYER_INTENT + B2B_INTENT + REBRAND_INTENT + PROBLEM_TRIGGERS:
             if k in lower:
                 terms.append(k)
         for term in terms:
-            c.execute("INSERT OR IGNORE INTO keywords (term) VALUES (?)", (term,))
-            c.execute("UPDATE keywords SET hits = hits + 1, updated_at = CURRENT_TIMESTAMP WHERE term = ?", (term,))
+            DB_QUEUE.put_nowait(("INSERT OR IGNORE INTO keywords (term) VALUES (?)", (term,)))
+            DB_QUEUE.put_nowait(("UPDATE keywords SET hits = hits + 1, updated_at = CURRENT_TIMESTAMP WHERE term = ?", (term,)))
             if converted:
-                c.execute("UPDATE keywords SET conversions = conversions + 1, updated_at = CURRENT_TIMESTAMP WHERE term = ?", (term,))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Keyword Record Error: {e}")
+                DB_QUEUE.put_nowait(("UPDATE keywords SET conversions = conversions + 1, updated_at = CURRENT_TIMESTAMP WHERE term = ?", (term,)))
+    except Exception:
+        pass
 
 def prospect_has_active_conversation(user_id):
     try:
@@ -520,8 +502,7 @@ def prospect_has_active_conversation(user_id):
         row = c.fetchone()
         conn.close()
         return bool(row)
-    except Exception as e:
-        logger.error(f"Prospect conversation check error: {e}")
+    except Exception:
         return False
 SERVICE_USER_IDS = {777000}
 SERVICE_MSG_HINTS = ["login code", "do not give this code", "can be used to log in"]
@@ -705,6 +686,28 @@ except Exception:
     pass
 LEADS_JSON = 'leads.json'
 KEYWORD_TRIGGERS = ["buffer", "rebrand", "dns help", "provider down", "looking for fix"]
+DB_QUEUE = asyncio.Queue()
+async def db_writer_loop():
+    try:
+        conn = await aiosqlite.connect(DB_FILE)
+        try:
+            await conn.execute("PRAGMA journal_mode=WAL;")
+            await conn.execute("PRAGMA synchronous=NORMAL;")
+        except Exception:
+            pass
+        await conn.commit()
+        while True:
+            try:
+                sql, params = await DB_QUEUE.get()
+                try:
+                    await conn.execute(sql, params or [])
+                    await conn.commit()
+                except Exception:
+                    pass
+            except Exception:
+                await asyncio.sleep(1)
+    except Exception:
+        await asyncio.sleep(5)
 
 def _code_callback():
     try:
@@ -956,6 +959,15 @@ async def user_discovery_loop():
             stats = load_json(STATS_FILE, apex_supreme_stats)
             warm_start = stats.get("warmup_started_at")
             now_ts = time.time()
+            cpu = None
+            try:
+                import psutil
+                cpu = psutil.cpu_percent(interval=0.2)
+            except Exception:
+                cpu = None
+            if cpu is not None and cpu >= 70:
+                await asyncio.sleep(900)
+                continue
             if not warm_start:
                 warm_start = now_ts
                 stats["warmup_started_at"] = warm_start
@@ -1175,6 +1187,12 @@ async def handshake_processor():
     """V2.1: Perform heuristic reactions 10-15m before outreach."""
     while True:
         try:
+            cpu = None
+            try:
+                import psutil
+                cpu = psutil.cpu_percent(interval=0.2)
+            except Exception:
+                cpu = None
             now = time.time()
             # Copy keys to avoid RuntimeError during iteration
             to_process = [u for u, data in queued_handshakes.items() if data["due"] <= now]
@@ -1368,7 +1386,7 @@ async def handshake_processor():
             await asyncio.sleep(60)
         except Exception as e:
             logger.error(f"Handshake Processor Error: {e}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(120 if (cpu is not None and cpu >= 70) else 60)
 
 async def typing_heartbeat(entity, duration=6.0):
     start = time.time()
@@ -1650,6 +1668,7 @@ async def main():
     print("Initializing AURA APEX SUPREME V2.1: FORTRESS HARDENING...")
     init_db()
     migrate_db()
+    asyncio.create_task(db_writer_loop())
     async def ensure_qc_group_joined():
         stats = load_json(STATS_FILE, apex_supreme_stats)
         qc = stats.get("qc_groups", [])
