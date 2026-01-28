@@ -195,7 +195,9 @@ async def maybe_send_daily_audit(client: TelegramClient) -> None:
                 f"Deletions: 0"
             )
             try:
-                await client.send_message('me', msg)
+                send_dm = (os.environ.get("CURATOR_AUDIT_DM") or "").strip().lower() in ("1", "true", "yes")
+                if send_dm:
+                    await client.send_message('me', msg)
             except Exception:
                 pass
             risky_skipped_today = 0

@@ -17,11 +17,29 @@ Short, human-like Telegram outreach for IPTV leads using:
 - AURA_MODE: production | testing
 - SKIP_WARMUP: 1 | 0
 - STOP_OUTREACH: 1 | 0 (set 1 to pause all DMs)
+- CURATOR_CHANNEL_ID or TARGET_CHANNEL_ID, or CHANNEL_INVITE_LINK (for curator posting)
+- CURATOR_AUDIT_DM: 1 | 0 (send curator daily audit to Saved Messages)
 
 ## Run
-- Start: `python aura_apex_supreme.py`
+- Start both services: `python main.py`
+- Run sniper only: `python aura_apex_supreme.py`
 - Health: `/health` in private chat
 - Export DB: `/export` in private chat
+ 
+## High-Value Auto‑DM
+- The bot identifies high‑value leads in groups using intent and market signals
+- It queues a handshake and sends a short DM automatically during human hours
+- DM caps and FloodWait safeguards are applied per account trust state
+ 
+### Configuration
+- Ensure `STOP_OUTREACH=0` and `AURA_MODE=production` in `.env`
+- Set `MARKET` to match your audience (e.g., `en-US`)
+- Provide `SESSION_STRING` for stable login; `GROQ_API_KEY` enables AI composition
+ 
+### DM Examples
+- “hey — saw your note in the match thread. likely a dns/portal handshake issue. want a quick fix?”
+- “quick one — buffering every few mins usually means hardware accel fighting the OS. switch decoder to software and test. want the steps?”
+- “yo — if your xtream login keeps expiring, reduce epg refresh and pin dns. want a stable test line?” 
 
 ## Safety
 - DM caps vary by account/premium status
