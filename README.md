@@ -26,6 +26,10 @@ Short, human-like Telegram outreach for IPTV leads using:
 - Health: `/health` in private chat
 - Export DB: `/export` in private chat
  
+## Admin Commands
+- `/status` in private chat: CPU load, Rich Groups, Unique DMs, Spam Shielded, QC Groups, Day
+- `/find <query>` in private chat: searches `search_index.json` and returns short matches
+ 
 ## High-Value Auto‑DM
 - The bot identifies high‑value leads in groups using intent and market signals
 - It queues a handshake and sends a short DM automatically during human hours
@@ -35,6 +39,10 @@ Short, human-like Telegram outreach for IPTV leads using:
 - Ensure `STOP_OUTREACH=0` and `AURA_MODE=production` in `.env`
 - Set `MARKET` to match your audience (e.g., `en-US`)
 - Provide `SESSION_STRING` for stable login; `GROQ_API_KEY` enables AI composition
+ 
+### Session Generation
+- Regenerate a session string: `python generate_session.py`
+- Copy the printed string into `.env` as `SESSION_STRING` (single line)
  
 ### DM Examples
 - “hey — saw your note in the match thread. likely a dns/portal handshake issue. want a quick fix?”
@@ -46,6 +54,14 @@ Short, human-like Telegram outreach for IPTV leads using:
 - FloodWait errors auto-sleep; PeerFlood stops outreach
 - No links in first message; always reference the group/problem
 
+## Performance
+- `cryptg` enabled if present for C-based encryption acceleration
+- Entity saving disabled to reduce SQLite overhead (`client.session.save_entities = False`)
+- Lowered fetch limits and static UA fallback reduce CPU and I/O
+ 
 ## Notes
 - `.gitignore` excludes `.env`, DB, session files, and runtime stats
 - Market keywords extend scouting; scoring drives AI tone and outreach
+- Curator posts use the Aiden persona and auto‑watermark images with `brand/ax_logo.png`
+- Toggle curator daily audit DMs via `CURATOR_AUDIT_DM=1|0`
+- Lead capture writes to `leads.json` when group messages include: buffer, rebrand, dns help, provider down, looking for fix

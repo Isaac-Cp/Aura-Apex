@@ -284,13 +284,25 @@ def apply_market_keywords():
     except Exception as e:
         logger.error(f"Market keywords error: {e}")
 # Ghost Mode: User-Agent Rotation
-ua = UserAgent()
+try:
+    ua = UserAgent()
+except Exception:
+    ua = None
+UA_LIST = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+]
 request_counter = 0
 
 def get_ghost_ua():
     global request_counter
     request_counter += 1
-    return ua.random if request_counter % 5 == 0 else ua.chrome
+    if ua:
+        return ua.random if request_counter % 5 == 0 else ua.chrome
+    return random.choice(UA_LIST)
 
 def init_db():
     try:
@@ -682,6 +694,17 @@ if SESSION_STRING:
 else:
     client = TelegramClient(SESSION_NAME, int(API_ID), API_HASH, proxy=get_proxy(), loop=loop)
 apply_market_keywords()
+try:
+    import cryptg  # noqa: F401
+    logger.info("cryptg enabled")
+except Exception:
+    logger.warning("cryptg not available")
+try:
+    client.session.save_entities = False
+except Exception:
+    pass
+LEADS_JSON = 'leads.json'
+KEYWORD_TRIGGERS = ["buffer", "rebrand", "dns help", "provider down", "looking for fix"]
 
 def _code_callback():
     try:
@@ -953,7 +976,7 @@ async def user_discovery_loop():
                 continue
             if random.random() < 0.35:
                 kw = random.choice(ESSENTIAL_HASHTAGS)
-            res = await client(functions.contacts.SearchRequest(q=kw, limit=30))
+            res = await client(functions.contacts.SearchRequest(q=kw, limit=20))
             chats = getattr(res, 'chats', []) or []
             groups = load_json(PROCESSED_GROUPS, [])
             for ch in chats:
@@ -1010,7 +1033,7 @@ async def navigate_tosearch(keyword, max_pages=3, max_links=8):
 async def humanization_loop():
     while True:
         try:
-            dialogs = await client.get_dialogs(limit=20)
+            dialogs = await client.get_dialogs(limit=10)
             public_dialogs = [d for d in dialogs if d.is_channel or d.is_group]
             if public_dialogs:
                 target = random.choice(public_dialogs)
@@ -1082,6 +1105,12 @@ async def handle_v21_logic(event):
         user_id = event.sender_id
         group_id = event.chat_id
         group_title = getattr(event.chat, "title", "group")
+        try:
+            bl = set(SENTIMENT_BLACKLIST)
+            if any(k in text for k in bl):
+                return
+        except Exception:
+            pass
         sender = None
         try:
             sender = await event.get_sender()
@@ -1089,6 +1118,13 @@ async def handle_v21_logic(event):
         except Exception:
             username = None
         
+        if any(k in text for k in KEYWORD_TRIGGERS):
+            try:
+                leads = load_json(LEADS_JSON, [])
+                leads.append({"user_id": user_id, "group_id": group_id, "group_title": group_title, "text": event.raw_text, "ts": datetime.datetime.now().isoformat()})
+                save_json(LEADS_JSON, leads)
+            except Exception:
+                pass
         # New Lead Scoring (2026 Engine)
         s = calculate_lead_score(event.raw_text, sender)
         
@@ -1406,7 +1442,7 @@ async def historical_scan_loop():
                     if last_scanned_id and last_scanned_id > 0:
                         msgs = await client.get_messages(group_id, min_id=last_scanned_id, limit=100)
                     else:
-                        msgs = await client.get_messages(group_id, limit=100)
+                        msgs = await client.get_messages(group_id, limit=50)
                 except (UserBannedInChannelError, ChatWriteForbiddenError, ChannelPrivateError) as e:
                     mark_group_banned(group_id)
                     log_activity("group_banned", f"{group_id}:{str(e)[:160]}")
@@ -1660,7 +1696,8 @@ async def main():
             try:
                 if SESSION_STRING:
                     await client.connect()
-                    if not client.is_user_authorized():
+                    auth_ok = await client.is_user_authorized()
+                    if not auth_ok:
                         raise RuntimeError("Session string not authorized. Regenerate SESSION_STRING with session_gen.py.")
                     # Already authorized; no code callback needed
                 else:
@@ -1773,4 +1810,69 @@ if __name__ == '__main__':
         logger.critical(f"Fatal Error: {e}")
     finally:
         loop.close()
+@client.on(events.NewMessage(pattern=r'/find (.+)'))
+async def cmd_find(event):
+    try:
+        if not event.is_private:
+            return
+        q = event.pattern_match.group(1).strip().lower()
+        data = load_json("search_index.json", [])
+        results = []
+        for item in data:
+            try:
+                combined = " ".join(str(v) for v in item.values()).lower()
+            except Exception:
+                combined = str(item).lower()
+            if q and q in combined:
+                results.append(item)
+            if len(results) >= 5:
+                break
+        logger.info(f"/find query='{q}' matches={len(results)}")
+        if not results:
+            await event.reply("No matches.")
+            return
+        lines = []
+        for r in results[:3]:
+            title = str(r.get("title") or r.get("name") or "item")
+            hint = str(r.get("summary") or r.get("desc") or "")[:140]
+            lines.append(f"- {title}: {hint}")
+        await event.reply("\n".join(lines))
+    except Exception as e:
+        try:
+            await event.reply(f"Find failed: {e}")
+        except Exception:
+            pass
+@client.on(events.NewMessage(pattern='/status'))
+async def cmd_status(event):
+    try:
+        if not event.is_private:
+            return
+        stats = load_json(STATS_FILE, apex_supreme_stats)
+        try:
+            import psutil  # noqa: F401
+            cpu = psutil.cpu_percent(interval=0.5)
+            cpu_line = f"CPU: {cpu}%"
+        except Exception:
+            cpu_line = "CPU: unknown"
+        rich = stats.get("rich_joined", 0)
+        dms = stats.get("unique_dms", 0)
+        spam = stats.get("spam_shielded", 0)
+        day = stats.get("day_counter", 1)
+        qc = len(stats.get("qc_groups", []))
+        msg = (
+            f"Status\n"
+            f"{cpu_line}\n"
+            f"Rich Groups: {rich}\n"
+            f"Unique DMs: {dms}\n"
+            f"Spam Shielded: {spam}\n"
+            f"QC Groups: {qc}\n"
+            f"Day: {day}"
+        )
+        logger.info("/status replied")
+        await event.reply(msg)
+    except Exception as e:
+        try:
+            await event.reply(f"Status failed: {e}")
+        except Exception:
+            pass
 

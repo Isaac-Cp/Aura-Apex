@@ -496,6 +496,10 @@ async def curator_loop():
     session = StringSession(SESSION_STRING) if SESSION_STRING else None
     client = TelegramClient(session or "aura_curator_session", int(API_ID), API_HASH)
     async with client:
+        try:
+            client.session.save_entities = False
+        except Exception:
+            pass
         if not channel_id and (CHANNEL_INVITE_LINK or "").strip():
             channel_id = await resolve_channel_id(client, CHANNEL_INVITE_LINK.strip())
             if not channel_id:
