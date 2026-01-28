@@ -7,8 +7,10 @@ load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 PHONE_NUMBER = os.getenv("PHONE_NUMBER")
+SESSION_STRING = os.getenv("SESSION_STRING")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+CURATOR_CHANNEL_ID = os.getenv("CURATOR_CHANNEL_ID")
 
 BANNED_ZONES = [
     "AF", "AL", "DZ", "AO", "BY", "BO", "VG", "BF", "BI", "CM", "CF", "TD", "CU", "CD",
