@@ -35,6 +35,7 @@ from config import (
     BANNED_ZONES, BANNED_CURRENCIES, JUNK_KEYWORDS, 
     TIER_3_CODES, TIER_1_INDICATORS, URGENCY_KEYWORDS, SENTIMENT_BLACKLIST
 )
+from config import SESSION_STRING as CONFIG_SESSION_STRING
 
 # Logging Setup
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -103,17 +104,9 @@ async def safe_send_dm(client, peer, message):
             secs = int(getattr(e, "seconds", 60))
         except Exception:
             secs = 60
-        try:
-            await client.send_message('me', f"🚨 Bot is on FloodWait for {secs}s. Pausing outreach.")
-        except Exception:
-            pass
         await asyncio.sleep(secs)
         return False
     except PeerFloodError:
-        try:
-            await client.send_message('me', "❌ PeerFloodError: Account limited by SpamBot. STOP_OUTREACH=1 recommended.")
-        except Exception:
-            pass
         return False
 # Constants
 SESSION_NAME = 'aura_apex_supreme_session'
@@ -476,6 +469,17 @@ def user_opted_out(user_id):
     except Exception as e:
         logger.error(f"Opt-out Check Error: {e}")
         return False
+def get_responses_count(user_id):
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=30)
+        c = conn.cursor()
+        c.execute("SELECT responses_count FROM prospects WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,))
+        row = c.fetchone()
+        conn.close()
+        return int(row[0]) if row and row[0] is not None else 0
+    except Exception as e:
+        logger.error(f"Get responses count error: {e}")
+        return 0
 
 def record_keyword_hits(text, converted=False):
     try:
@@ -507,6 +511,8 @@ def prospect_has_active_conversation(user_id):
     except Exception as e:
         logger.error(f"Prospect conversation check error: {e}")
         return False
+SERVICE_USER_IDS = {777000}
+SERVICE_MSG_HINTS = ["login code", "do not give this code", "can be used to log in"]
 
 def should_queue_handshake(user_id):
     if user_opted_out(user_id):
@@ -668,7 +674,9 @@ if not API_ID or not API_HASH:
 # Explicit loop management for stability
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
-SESSION_STRING = (os.environ.get("SESSION_STRING") or "").strip()
+_env_session = (os.environ.get("SESSION_STRING") or "").strip()
+_cfg_session = (CONFIG_SESSION_STRING or "").strip()
+SESSION_STRING = _cfg_session or _env_session
 if SESSION_STRING:
     client = TelegramClient(StringSession(SESSION_STRING), int(API_ID), API_HASH, proxy=get_proxy(), loop=loop)
 else:
@@ -905,11 +913,6 @@ async def gatekeeper(chat_ref):
         urgent = any(k in combined_text for k in urgent_terms)
         status_val = "URGENT" if urgent else "VERIFIED"
         save_lead_to_db(link or f"channel_id:{chat_id}", chat_title, members if 'members' in locals() else 0, tech_hits, total_q_score, status_val)
-        if urgent:
-            try:
-                await client.send_message('me', f"ðŸ”´ URGENT Lead\nGroup: {chat_title}\nLink: {link or f'channel_id:{chat_id}'}")
-            except Exception:
-                pass
         
         try:
             await client(UpdateNotifySettingsRequest(
@@ -966,10 +969,6 @@ async def user_discovery_loop():
                 is_rich, reason = await gatekeeper(ch if not uname else ident)
                 if is_rich:
                     stats["rich_joined"] += 1
-                    try:
-                        await client.send_message('me', f"ðŸ† Discovery: Gold Lead\nLink: {ident}\n{reason}")
-                    except Exception:
-                        pass
                 save_json(STATS_FILE, stats)
             interval = 1800 if os.environ.get("AURA_MODE", "").lower() == "testing" else 14400
             await asyncio.sleep(interval)
@@ -1039,6 +1038,8 @@ watchlist = {} # user_id: expire_time
 async def handle_v21_logic(event):
     if event.is_private:
         text = event.raw_text.lower()
+        if (event.sender_id in SERVICE_USER_IDS) or any(h in text for h in SERVICE_MSG_HINTS):
+            return
         shield_terms = set(SENTIMENT_BLACKLIST + ["report", "spam", "scam", "block", "fuck off", "who is this"])
         user_id = event.sender_id
         if any(k in text for k in shield_terms):
@@ -1060,6 +1061,7 @@ async def handle_v21_logic(event):
             return
         conv_terms = ["trial", "test line", "ready to buy", "how much", "send details", "ok send", "price", "subscribe", "subscription"]
         is_conversion = any(k in text for k in conv_terms)
+        pre_count = get_responses_count(user_id)
         if is_conversion:
             update_prospect_status(user_id, "converted", opt_out=False, increment_response=True)
             record_keyword_hits(event.raw_text, converted=True)
@@ -1068,10 +1070,11 @@ async def handle_v21_logic(event):
             update_prospect_status(user_id, "responded", opt_out=False, increment_response=True)
             record_keyword_hits(event.raw_text, converted=False)
             log_activity("inbound_dm", f"{user_id}:{event.raw_text[:140]}")
-        try:
-            await client.send_message('me', f"Lead replied. User: {user_id} | Msg: {event.raw_text[:140]}")
-        except Exception:
-            pass
+        if pre_count == 0:
+            try:
+                await client.send_message('me', f"Lead replied. User: {user_id} | Msg: {event.raw_text[:140]}")
+            except Exception:
+                pass
         return
 
     if not event.is_private:
@@ -1089,12 +1092,6 @@ async def handle_v21_logic(event):
         # New Lead Scoring (2026 Engine)
         s = calculate_lead_score(event.raw_text, sender)
         
-        # Log High Value Leads
-        if s >= 7:
-             try:
-                await client.send_message('me', f"🔥 **HIGH VALUE LEAD**\nScore: {s}\nUser: `{event.sender_id}`\nMsg: `{event.raw_text[:100]}`")
-             except: pass
-        
         basic_terms = ["need iptv", "looking for streaming", "best tv provider", "looking for iptv", "iptv recommendation", "need streaming"]
         
         # Threshold: 7 (was 8)
@@ -1105,12 +1102,6 @@ async def handle_v21_logic(event):
             record_keyword_hits(event.raw_text, converted=False)
             log_activity("prospect_identified", f"{user_id}:{group_title}:{event.id}")
             
-        # Notification for super high scores
-        if s >= 10:
-             try:
-                await client.send_message('me', f"🚀 **SUPER LEAD DETECTED**\nScore: {s}\nUser: `{event.sender_id}`")
-             except: pass
-        
         # Conversation Watchlist Escalation (5-minute watch)
         now = time.time()
         exp = watchlist.get(event.sender_id)
@@ -1577,10 +1568,6 @@ async def stats_report():
                         stats["last_zero_response_since"] = now_ts
                     else:
                         if now_ts - zero_since >= 43200: # 12h
-                            try:
-                                await client.send_message('me', "âš ï¸ Shadowban suspected: responses 0% for 12h. Switch to backup session.")
-                            except Exception:
-                                pass
                             stats["shadowban_alerted"] = True
                     save_json(STATS_FILE, stats)
                 else:
@@ -1602,7 +1589,6 @@ async def stats_report():
                 f"ðŸ“ˆ **Day:** {stats['day_counter']} | **State:** ðŸŸ¢\n"
                 f"ðŸ” **QC Groups:** {len(stats.get('qc_groups', []))}"
             )
-            await client.send_message('me', report)
         except Exception as e:
             logger.error(f"Stats Report Error: {e}")
 
@@ -1673,7 +1659,10 @@ async def main():
         for _ in range(retries):
             try:
                 if SESSION_STRING:
-                    await client.start()
+                    await client.connect()
+                    if not client.is_user_authorized():
+                        raise RuntimeError("Session string not authorized. Regenerate SESSION_STRING with session_gen.py.")
+                    # Already authorized; no code callback needed
                 else:
                     await client.start(phone=PHONE_NUMBER, code_callback=_code_callback, password=os.environ.get("TELEGRAM_PASSWORD"))
                 return
@@ -1695,10 +1684,7 @@ async def main():
     try:
         qc_ok = await ensure_qc_group_joined()
         if not qc_ok:
-            try:
-                await client.send_message('me', "QC group join verification failed or unavailable. Discovery will pause DM/historical operations.")
-            except Exception:
-                pass
+            pass
     except Exception:
         qc_ok = False
     asyncio.create_task(user_discovery_loop())
