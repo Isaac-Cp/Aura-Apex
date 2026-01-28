@@ -18,14 +18,17 @@ from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelReque
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings, ReactionEmoji, UserStatusOffline, UserStatusOnline, UserStatusRecently, UserStatusLastWeek, UserStatusLastMonth
-from telethon.errors import FloodWaitError, UserPrivacyRestrictedError, PeerIdInvalidError, YouBlockedUserError, UserBannedInChannelError, ChatWriteForbiddenError, ChannelPrivateError
+from telethon.errors import FloodWaitError, UserPrivacyRestrictedError, PeerIdInvalidError, YouBlockedUserError, UserBannedInChannelError, ChatWriteForbiddenError, ChannelPrivateError, PeerFloodError
 from telethon.tl.functions.contacts import BlockRequest
 from fake_useragent import UserAgent
 from groq import AsyncGroq
 from deep_translator import GoogleTranslator
 
 # Custom modules
-from aura_core import proxy_health_monitor, should_outreach, load_json, save_json, clean_old_logs
+from aura_core import (
+    proxy_health_monitor, should_outreach, load_json, save_json, clean_old_logs,
+    calculate_lead_score, REBRAND_KEYWORDS, URGENCY_KEYWORDS, COMPETITOR_KEYWORDS
+)
 from keep_alive import keep_alive
 from config import (
     API_ID, API_HASH, PHONE_NUMBER, GROQ_API_KEY,
@@ -53,6 +56,65 @@ if GROQ_API_KEY:
 else:
     logger.warning("GROQ_API_KEY missing.")
 
+SYSTEM_PROMPT = (
+    "You are 'Aiden', a helpful and technical member of an IPTV enthusiast community.\n"
+    "Your goal is to send a short, conversational Telegram DM to a lead.\n\n"
+    "STRICT RULES:\n"
+    "1. NO FORMAL GREETINGS: Use \"Hey\", \"Yo\", or \"Quick one\". Never \"Dear\" or \"Hello\".\n"
+    "2. NO SALES JARGON: Avoid \"innovative\", \"solution\", \"guarantee\", or \"best-in-class\".\n"
+    "3. BREVITY: Maximum 40 words. Use 1-2 short sentences.\n"
+    "4. TONE: Peer-to-peer, slightly informal. Use lowercase occasionally like a mobile user.\n"
+    "5. CONTEXT: Always reference the group and the specific problem they mentioned.\n"
+    "6. CTA: End with a low-pressure question, not a link."
+)
+
+async def generate_ai_dm(lead_name, group_name, user_msg, lead_score, context_hint, style_hint):
+    if not ai_client:
+        return None
+    intent_focus = "focus on fixing their technical issue/buffering"
+    if lead_score >= 7:
+        intent_focus = "casually mention our 'Aura Apex' rebranding service as the ultimate fix"
+    up = (
+        f"Lead Name: {lead_name}\n"
+        f"Group Found In: {group_name}\n"
+        f"What they said: \"{user_msg}\"\n"
+        f"Instruction: {intent_focus}. {style_hint}. {context_hint}."
+    )
+    resp = await ai_client.chat.completions.create(
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": up}
+        ],
+        model="llama-3.3-70b-versatile",
+        temperature=0.7,
+        max_tokens=60
+    )
+    dm = (resp.choices[0].message.content or "").strip()
+    dm = re.sub(r'(https?://\S+|t\.me/\S+)', '', dm)
+    return dm
+async def safe_send_dm(client, peer, message):
+    try:
+        async with client.action(peer, 'typing'):
+            await asyncio.sleep(random.uniform(3, 7))
+            await client.send_message(peer, message)
+        return True
+    except FloodWaitError as e:
+        try:
+            secs = int(getattr(e, "seconds", 60))
+        except Exception:
+            secs = 60
+        try:
+            await client.send_message('me', f"🚨 Bot is on FloodWait for {secs}s. Pausing outreach.")
+        except Exception:
+            pass
+        await asyncio.sleep(secs)
+        return False
+    except PeerFloodError:
+        try:
+            await client.send_message('me', "❌ PeerFloodError: Account limited by SpamBot. STOP_OUTREACH=1 recommended.")
+        except Exception:
+            pass
+        return False
 # Constants
 SESSION_NAME = 'aura_apex_supreme_session'
 STATS_FILE = 'supreme_stats.json'
@@ -486,6 +548,13 @@ def detect_language_from_text(text):
         return None
     except Exception:
         return None
+
+def outreach_blocked():
+    try:
+        v = os.environ.get("STOP_OUTREACH", "").strip().lower()
+        return v in ("1", "true", "yes")
+    except Exception:
+        return False
 
 def choose_target_language(bio_text, snippet):
     lang_text = detect_language_from_text(snippet or "")
@@ -1010,33 +1079,42 @@ async def handle_v21_logic(event):
         user_id = event.sender_id
         group_id = event.chat_id
         group_title = getattr(event.chat, "title", "group")
+        sender = None
         try:
             sender = await event.get_sender()
             username = getattr(sender, "username", None)
         except Exception:
             username = None
-        if any(k in text for k in URGENCY_KEYWORDS):
+        
+        # New Lead Scoring (2026 Engine)
+        s = calculate_lead_score(event.raw_text, sender)
+        
+        # Log High Value Leads
+        if s >= 7:
              try:
-                await client.send_message('me', f"ðŸ”´ **URGENCY: GOLDEN LEAD**\nUser: `{event.sender_id}`\nMsg: `{event.raw_text[:50]}`")
+                await client.send_message('me', f"🔥 **HIGH VALUE LEAD**\nScore: {s}\nUser: `{event.sender_id}`\nMsg: `{event.raw_text[:100]}`")
              except: pass
         
-        s = intent_score(event.raw_text)
         basic_terms = ["need iptv", "looking for streaming", "best tv provider", "looking for iptv", "iptv recommendation", "need streaming"]
-        if s >= 8 or any(t in text for t in basic_terms):
+        
+        # Threshold: 7 (was 8)
+        if s >= 7 or any(t in text for t in basic_terms):
             msg_ts = getattr(event.message, "date", datetime.datetime.now()).isoformat()
             persona_id = choose_persona_id()
             save_prospect(user_id, username, event.raw_text, event.id, msg_ts, group_id, group_title, persona_id, "not_contacted")
             record_keyword_hits(event.raw_text, converted=False)
             log_activity("prospect_identified", f"{user_id}:{group_title}:{event.id}")
+            
+        # Notification for super high scores
         if s >= 10:
-            try:
-                await client.send_message('me', f"ðŸŸ¡ High-Intent Lead\nUser: `{event.sender_id}`\nScore: `{s}`\nMsg: `{event.raw_text[:140]}`")
-            except: pass
+             try:
+                await client.send_message('me', f"🚀 **SUPER LEAD DETECTED**\nScore: {s}\nUser: `{event.sender_id}`")
+             except: pass
         
         # Conversation Watchlist Escalation (5-minute watch)
         now = time.time()
         exp = watchlist.get(event.sender_id)
-        if exp and now <= exp and s >= 10:
+        if exp and now <= exp and s >= 7: # Lowered threshold
             user_id = event.sender_id
             if user_id not in queued_handshakes and should_queue_handshake(user_id):
                 group_title = getattr(event.chat, "title", "group")
@@ -1048,11 +1126,12 @@ async def handle_v21_logic(event):
                     "group_title": group_title
                 }
             watchlist.pop(event.sender_id, None)
-        elif s < 6 and event.sender_id not in watchlist:
+        elif s < 4 and event.sender_id not in watchlist: # Adjusted low score check
             watchlist[event.sender_id] = now + 300
         
         # Potential Lead Handshake (Random selection)
-        if (s >= 12 or any(val in text for val in TIER_1_INDICATORS)) and random.random() < 0.5:
+        # Threshold: 7 (was 12)
+        if (s >= 7 or any(val in text for val in TIER_1_INDICATORS)) and random.random() < 0.6: # Slightly increased probability
             user_id = event.sender_id
             if user_id not in queued_handshakes and should_queue_handshake(user_id):
                 group_title = getattr(event.chat, "title", "group")
@@ -1063,7 +1142,7 @@ async def handle_v21_logic(event):
                     "snippet": event.raw_text[:120],
                     "group_title": group_title
                 }
-                logger.info(f"Queued Handshake for {user_id} in 10-15m.")
+                logger.info(f"Queued Handshake for {user_id} in 10-15m (Score: {s}).")
 
 async def handshake_processor():
     """V2.1: Perform heuristic reactions 10-15m before outreach."""
@@ -1167,56 +1246,34 @@ async def handshake_processor():
                         dm_text = None
                         persona_id = get_prospect_persona(u, chat_id) or choose_persona_id()
                         try:
-                            rebrand_focus = any(v.lower() in (snippet or "").lower() for v in REBRAND_INTENT)
+                            snippet_lower = (snippet or "").lower()
+                            rebrand_focus = any(v in snippet_lower for v in REBRAND_KEYWORDS)
+                            pain_focus = any(v in snippet_lower for v in URGENCY_KEYWORDS)
+                            competitor_focus = any(v in snippet_lower for v in COMPETITOR_KEYWORDS)
+
                             branding_line = (" we can rebrand the app with your logo and color scheme." if rebrand_focus 
                                              else " i can match your brand (logo/colors) inside the app.")
+                            
+                            ai_context_instruction = ""
+                            if pain_focus:
+                                ai_context_instruction = "User is frustrated. Emphasize that our solution FIXES buffering/blocks immediately. Be empathetic."
+                            elif rebrand_focus:
+                                ai_context_instruction = "User wants rebranding. Focus on 'White Label', 'Custom Logo', and 'DNS Hardcoding'. Be professional."
+                            elif competitor_focus:
+                                ai_context_instruction = "User mentions a competitor. Subtle comparison: 'Aura Apex is more stable/customizable'."
+
                             if ai_client:
-                                if persona_id == "expert":
-                                    prompt = (
-                                        "You are Aiden (Expert). Calm tech specialist. "
-                                        "Reference root cause (DNS/portal). Include brief service details "
-                                        "(4K sports, catchup, anti-freeze). Add a tailored recommendation. "
-                                        "Briefly introduce a rebrand option with visual branding (logo, color scheme). "
-                                        "Keep under 60 words, no links. "
-                                        "End with: â€œare you on tivimate or a different player? i have setup guides for both and can rebrand the app with your logo/colors.â€ "
-                                        f"Context: {social_hint}"
-                                    )
-                                elif persona_id == "peer":
-                                    prompt = (
-                                        "You are Aiden (Peer). Casual friend vibe. "
-                                        "Mention switching panels worked 10/10. Include brief service details "
-                                        "(stable streams, 4K options, support). Tailor recommendations. "
-                                        "Briefly introduce a rebrand option with visual branding (logo, color scheme). "
-                                        "Keep under 60 words, no links. "
-                                        "End with: â€œare you on tivimate or something else? iâ€™ve got specific guides and can rebrand with your logo/colors.â€ "
-                                        f"Context: {social_hint}"
-                                    )
-                                else:
-                                    prompt = (
-                                        "You are Aiden (Concise). Brief and direct. "
-                                        "Offer a stable trial privately with short service details "
-                                        "(no-buffer, sports, catchup). Tailor the recommendation. "
-                                        "Briefly introduce a rebrand option with visual branding (logo, color scheme). "
-                                        "Keep under 50 words, no links. "
-                                        "End with: â€œare you using tivimate or another player? i can send the exact setup and rebrand with your logo/colors.â€ "
-                                        f"Context: {social_hint}"
-                                    )
-                                user_msg = f"Quoted from {group_title}: \"{snippet}\""
-                                resp = await ai_client.chat.completions.create(
-                                    messages=[
-                                        {"role": "system", "content": prompt},
-                                        {"role": "user", "content": user_msg}
-                                    ],
-                                    model="llama-3.3-70b-versatile",
-                                )
-                                dm_text = (resp.choices[0].message.content or "").strip()
-                                # Safety: strip links
-                                dm_text = re.sub(r'(https?://\S+|t\.me/\S+)', '', dm_text)
-                                # Hard cap length
-                                if len(dm_text) > 220:
-                                    dm_text = dm_text[:220]
-                                if ("logo" not in dm_text.lower()) and ("color" not in dm_text.lower()):
-                                    dm_text = (dm_text + branding_line).strip()
+                                s = calculate_lead_score(snippet, getattr(fu, "user", None))
+                                style_hint = "use helpful peer tone"
+                                if s >= 7 and rebrand_focus:
+                                    style_hint = "use expert consultant tone and mention rebranding"
+                                context_hint = (social_hint + " " + ai_context_instruction).strip()
+                                dm_text = await generate_ai_dm(uname or "there", group_title, snippet, s, context_hint, style_hint)
+                                if dm_text:
+                                    if len(dm_text) > 220:
+                                        dm_text = dm_text[:220]
+                                    if ("logo" not in dm_text.lower()) and ("color" not in dm_text.lower()):
+                                        dm_text = (dm_text + branding_line).strip()
                             else:
                                 if persona_id == "expert":
                                     base = f"saw your note in {group_title}. likely dns/portal handshake."
@@ -1258,26 +1315,21 @@ async def handshake_processor():
                         except Exception:
                             pass
                         try:
+                            if outreach_blocked():
+                                logger.info("Skipping DM (STOP_OUTREACH enabled).")
+                                continue
                             await client.send_read_acknowledge(u)
-                            try:
-                                async with client.action(u, 'typing'):
-                                    await asyncio.sleep(random.randint(5, 8))
-                            except Exception:
-                                await typing_heartbeat(u, random.uniform(6, 9))
                             await asyncio.sleep(random.randint(300, 420))
-                            await client.send_message(u, dm_text)
+                            sent = await safe_send_dm(client, u, dm_text)
+                            if not sent:
+                                continue
                             update_prospect_status(u, "contacted", opt_out=False, increment_response=False)
                             log_activity("dm_sent", f"{u}:{group_title}")
                             stats["dm_initiated_today"] = dm_today + 1
                             stats["unique_dms"] = stats.get("unique_dms", 0) + 1
                             save_json(STATS_FILE, stats)
                             logger.info(f"DM sent to {u}. Count today: {stats['dm_initiated_today']}/{cap}")
-                            # Human interval throttle between conversations
-                            await asyncio.sleep(random.randint(900, 1200))  # 15â€“20 minutes
-                        except FloodWaitError as fe:
-                            wait_s = int(getattr(fe, "seconds", 60)) + 60
-                            logger.warning(f"FloodWait: sleeping {wait_s}s")
-                            await asyncio.sleep(wait_s)
+                            await asyncio.sleep(random.randint(900, 1200))
                         except (UserPrivacyRestrictedError, YouBlockedUserError, PeerIdInvalidError) as e:
                             logger.info(f"DM skipped due to privacy/block/invalid: {e}")
                             continue
