@@ -4,7 +4,7 @@ color 0A
 
 :loop
 echo Starting Telegram Bot...
-python main.py
+python aura_apex_supreme.py
 echo.
 echo ⚠️ Bot stopped or crashed!
 echo 🔄 Restarting in 10 seconds... (Press Ctrl+C to Exit)

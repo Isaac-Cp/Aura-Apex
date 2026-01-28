@@ -1,4 +1,4 @@
-
+﻿
 import asyncio
 import logging
 import logging.handlers
@@ -72,7 +72,7 @@ SCOUTER_MISSIONS = {
     "Scouter 1 (Panels & Infrastructure)": [
         "private iptv infrastructure 2026", "anti-freeze server direct owner",
         "High-uptime IPTV panel UK", "Dedicated IPTV ports USA",
-        "Rivenditore IPTV stabilità", "Panel de revendedor estable"
+        "Rivenditore IPTV stabilitÃ ", "Panel de revendedor estable"
     ],
     "Scouter 2 (Fire Stick)": [
         "Fire Stick setup Spain", "Android Box Italy",
@@ -185,11 +185,11 @@ MARKET_KEYWORDS = {
         "tags": ["#USIPTV", "#NFL", "#NBA", "#ESPN", "#USStreams"]
     },
     "es-ES": {
-        "buyer": ["busco iptv estable", "futbol 4k españa", "lista m3u españa"],
-        "b2b": ["revendedor panel españa", "creditos mayorista iptv", "dueño directo españa"],
-        "rebrand": ["marca blanca iptv", "dns fijado españa", "portal facturacion"],
+        "buyer": ["busco iptv estable", "futbol 4k espaÃ±a", "lista m3u espaÃ±a"],
+        "b2b": ["revendedor panel espaÃ±a", "creditos mayorista iptv", "dueÃ±o directo espaÃ±a"],
+        "rebrand": ["marca blanca iptv", "dns fijado espaÃ±a", "portal facturacion"],
         "problem": ["pantalla negra", "buffering", "servidor caido"],
-        "tags": ["#IPTVEspaña", "#LaLiga", "#Futbol4K", "#StreamsES"]
+        "tags": ["#IPTVEspaÃ±a", "#LaLiga", "#Futbol4K", "#StreamsES"]
     },
     "it-IT": {
         "buyer": ["cerco iptv stabile", "serie a 4k", "lista m3u italia"],
@@ -200,7 +200,7 @@ MARKET_KEYWORDS = {
     },
     "de-DE": {
         "buyer": ["suche iptv stabil", "bundesliga 4k", "m3u liste deutsch"],
-        "b2b": ["reseller panel de", "großhandel credits", "direkter anbieter"],
+        "b2b": ["reseller panel de", "groÃŸhandel credits", "direkter anbieter"],
         "rebrand": ["white label de", "dns hardcode de", "abrechnung portal"],
         "problem": ["schwarzer bildschirm", "puffern", "server down"],
         "tags": ["#IPTVDeutschland", "#Bundesliga", "#4KDE", "#StreamsDE"]
@@ -209,7 +209,7 @@ MARKET_KEYWORDS = {
         "buyer": ["cherche iptv stable", "ligue 1 4k", "liste m3u france"],
         "b2b": ["revendeur panel fr", "credits iptv gros", "proprio direct fr"],
         "rebrand": ["white label france", "dns verrouille fr", "portail facturation"],
-        "problem": ["écran noir", "buffering constant", "serveur down"],
+        "problem": ["Ã©cran noir", "buffering constant", "serveur down"],
         "tags": ["#IPTVFrance", "#Ligue1", "#4KFR", "#StreamsFR"]
     }
 }
@@ -315,7 +315,7 @@ def migrate_db():
 
 def save_lead_to_db(link, title, members, tech_score, quality_score, status):
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         c = conn.cursor()
         c.execute("INSERT OR REPLACE INTO leads (link, group_title, members, tech_score, quality_score, status) VALUES (?, ?, ?, ?, ?, ?)",
                   (link, title, members, tech_score, quality_score, status))
@@ -326,7 +326,7 @@ def save_lead_to_db(link, title, members, tech_score, quality_score, status):
 
 def log_activity(event_type, details):
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         c = conn.cursor()
         c.execute("INSERT INTO activity_log (type, details) VALUES (?, ?)", (event_type, details[:1000]))
         conn.commit()
@@ -336,7 +336,7 @@ def log_activity(event_type, details):
 
 def record_joined_group(group_id, title, username, link):
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         c = conn.cursor()
         c.execute("""INSERT OR IGNORE INTO joined_groups (group_id, title, username, link) 
                      VALUES (?, ?, ?, ?)""", (group_id, title, username, link))
@@ -347,7 +347,7 @@ def record_joined_group(group_id, title, username, link):
 
 def mark_group_banned(group_id):
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         c = conn.cursor()
         c.execute("UPDATE joined_groups SET banned = 1 WHERE group_id = ?", (group_id,))
         conn.commit()
@@ -357,7 +357,7 @@ def mark_group_banned(group_id):
 
 def save_prospect(user_id, username, message, message_id, message_ts, group_id, group_title, persona_id, status):
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         c = conn.cursor()
         c.execute("""INSERT OR IGNORE INTO prospects 
                      (user_id, username, message, message_id, message_ts, group_id, group_title, persona_id, status) 
@@ -373,7 +373,7 @@ def choose_persona_id():
 
 def get_prospect_persona(user_id, group_id):
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         c = conn.cursor()
         c.execute("SELECT persona_id FROM prospects WHERE user_id = ? AND group_id = ? ORDER BY id DESC LIMIT 1", (user_id, group_id))
         row = c.fetchone()
@@ -384,7 +384,7 @@ def get_prospect_persona(user_id, group_id):
         return None
 def update_prospect_status(user_id, status, opt_out=False, increment_response=False):
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         c = conn.cursor()
         fields = []
         params = []
@@ -405,7 +405,7 @@ def update_prospect_status(user_id, status, opt_out=False, increment_response=Fa
 
 def user_opted_out(user_id):
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         c = conn.cursor()
         c.execute("SELECT opt_out FROM prospects WHERE user_id = ? AND opt_out = 1 LIMIT 1", (user_id,))
         row = c.fetchone()
@@ -417,7 +417,7 @@ def user_opted_out(user_id):
 
 def record_keyword_hits(text, converted=False):
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         c = conn.cursor()
         lower = text.lower()
         terms = []
@@ -436,7 +436,7 @@ def record_keyword_hits(text, converted=False):
 
 def prospect_has_active_conversation(user_id):
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         c = conn.cursor()
         c.execute("SELECT 1 FROM prospects WHERE user_id = ? AND status IN ('responded','converted') LIMIT 1", (user_id,))
         row = c.fetchone()
@@ -457,7 +457,7 @@ def detect_language_from_bio(text):
     if not text:
         return "unknown"
     try:
-        if re.search(r'[А-Яа-яЁё]', text):
+        if re.search(r'[Ð-Ð¯Ð°-ÑÐÑ‘]', text):
             return "ru"
         return "latin"
     except Exception:
@@ -481,7 +481,7 @@ def detect_language_from_text(text):
     try:
         if not text:
             return None
-        if re.search(r'[А-Яа-яЁё]', text):
+        if re.search(r'[Ð-Ð¯Ð°-ÑÐÑ‘]', text):
             return "ru"
         return None
     except Exception:
@@ -838,7 +838,7 @@ async def gatekeeper(chat_ref):
         save_lead_to_db(link or f"channel_id:{chat_id}", chat_title, members if 'members' in locals() else 0, tech_hits, total_q_score, status_val)
         if urgent:
             try:
-                await client.send_message('me', f"🔴 URGENT Lead\nGroup: {chat_title}\nLink: {link or f'channel_id:{chat_id}'}")
+                await client.send_message('me', f"ðŸ”´ URGENT Lead\nGroup: {chat_title}\nLink: {link or f'channel_id:{chat_id}'}")
             except Exception:
                 pass
         
@@ -872,15 +872,10 @@ async def user_discovery_loop():
                 await asyncio.sleep(600)
                 continue
             # Warm-up phase: read-only before joining groups
-            # Warm-up configurable via env; skip if SKIP_WARMUP=1
-            if os.environ.get("SKIP_WARMUP", "0") == "1":
+            if os.environ.get("SKIP_WARMUP") == "1":
                 warmup_window = 0
             else:
-                default_warmup = 900 if os.environ.get("AURA_MODE", "").lower() == "testing" else 86400
-                try:
-                    warmup_window = int(os.environ.get("AURA_WARMUP_SECONDS", str(default_warmup)))
-                except Exception:
-                    warmup_window = default_warmup
+                warmup_window = 900 if os.environ.get("AURA_MODE", "").lower() == "testing" else 3600
             if now_ts - warm_start < warmup_window:
                 await asyncio.sleep(1800)
                 continue
@@ -903,7 +898,7 @@ async def user_discovery_loop():
                 if is_rich:
                     stats["rich_joined"] += 1
                     try:
-                        await client.send_message('me', f"🏆 Discovery: Gold Lead\nLink: {ident}\n{reason}")
+                        await client.send_message('me', f"ðŸ† Discovery: Gold Lead\nLink: {ident}\n{reason}")
                     except Exception:
                         pass
                 save_json(STATS_FILE, stats)
@@ -957,7 +952,7 @@ async def humanization_loop():
                 if msgs and msgs[0].text:
                      try:
                          await client(functions.messages.SendReactionRequest(
-                             peer=target, msg_id=msgs[0].id, reaction=[ReactionEmoji(emoticon='👍')]
+                             peer=target, msg_id=msgs[0].id, reaction=[ReactionEmoji(emoticon='ðŸ‘')]
                          ))
                      except: pass
             
@@ -1022,7 +1017,7 @@ async def handle_v21_logic(event):
             username = None
         if any(k in text for k in URGENCY_KEYWORDS):
              try:
-                await client.send_message('me', f"🔴 **URGENCY: GOLDEN LEAD**\nUser: `{event.sender_id}`\nMsg: `{event.raw_text[:50]}`")
+                await client.send_message('me', f"ðŸ”´ **URGENCY: GOLDEN LEAD**\nUser: `{event.sender_id}`\nMsg: `{event.raw_text[:50]}`")
              except: pass
         
         s = intent_score(event.raw_text)
@@ -1035,7 +1030,7 @@ async def handle_v21_logic(event):
             log_activity("prospect_identified", f"{user_id}:{group_title}:{event.id}")
         if s >= 10:
             try:
-                await client.send_message('me', f"🟡 High-Intent Lead\nUser: `{event.sender_id}`\nScore: `{s}`\nMsg: `{event.raw_text[:140]}`")
+                await client.send_message('me', f"ðŸŸ¡ High-Intent Lead\nUser: `{event.sender_id}`\nScore: `{s}`\nMsg: `{event.raw_text[:140]}`")
             except: pass
         
         # Conversation Watchlist Escalation (5-minute watch)
@@ -1087,7 +1082,7 @@ async def handshake_processor():
                     try:
                         if should_outreach():
                             await client(functions.messages.SendReactionRequest(
-                                peer=chat_id, msg_id=msg_id, reaction=[ReactionEmoji(emoticon='👍')]
+                                peer=chat_id, msg_id=msg_id, reaction=[ReactionEmoji(emoticon='ðŸ‘')]
                             ))
                         logger.info(f"Heuristic Handshake: Reacted to {u} in {chat_id}")
                     except Exception as e:
@@ -1183,7 +1178,7 @@ async def handshake_processor():
                                         "(4K sports, catchup, anti-freeze). Add a tailored recommendation. "
                                         "Briefly introduce a rebrand option with visual branding (logo, color scheme). "
                                         "Keep under 60 words, no links. "
-                                        "End with: “are you on tivimate or a different player? i have setup guides for both and can rebrand the app with your logo/colors.” "
+                                        "End with: â€œare you on tivimate or a different player? i have setup guides for both and can rebrand the app with your logo/colors.â€ "
                                         f"Context: {social_hint}"
                                     )
                                 elif persona_id == "peer":
@@ -1193,7 +1188,7 @@ async def handshake_processor():
                                         "(stable streams, 4K options, support). Tailor recommendations. "
                                         "Briefly introduce a rebrand option with visual branding (logo, color scheme). "
                                         "Keep under 60 words, no links. "
-                                        "End with: “are you on tivimate or something else? i’ve got specific guides and can rebrand with your logo/colors.” "
+                                        "End with: â€œare you on tivimate or something else? iâ€™ve got specific guides and can rebrand with your logo/colors.â€ "
                                         f"Context: {social_hint}"
                                     )
                                 else:
@@ -1203,7 +1198,7 @@ async def handshake_processor():
                                         "(no-buffer, sports, catchup). Tailor the recommendation. "
                                         "Briefly introduce a rebrand option with visual branding (logo, color scheme). "
                                         "Keep under 50 words, no links. "
-                                        "End with: “are you using tivimate or another player? i can send the exact setup and rebrand with your logo/colors.” "
+                                        "End with: â€œare you using tivimate or another player? i can send the exact setup and rebrand with your logo/colors.â€ "
                                         f"Context: {social_hint}"
                                     )
                                 user_msg = f"Quoted from {group_title}: \"{snippet}\""
@@ -1244,7 +1239,7 @@ async def handshake_processor():
                             if persona_id == "expert":
                                 dm_text = f"noticed your note in {group_title}. dns/portal fix worked for me. want steps?"
                             elif persona_id == "peer":
-                                dm_text = "had same issue—switched panels and it’s solid now. want details?"
+                                dm_text = "had same issueâ€”switched panels and itâ€™s solid now. want details?"
                             else:
                                 dm_text = "want a stable trial link? i can share privately."
 
@@ -1278,7 +1273,7 @@ async def handshake_processor():
                             save_json(STATS_FILE, stats)
                             logger.info(f"DM sent to {u}. Count today: {stats['dm_initiated_today']}/{cap}")
                             # Human interval throttle between conversations
-                            await asyncio.sleep(random.randint(900, 1200))  # 15–20 minutes
+                            await asyncio.sleep(random.randint(900, 1200))  # 15â€“20 minutes
                         except FloodWaitError as fe:
                             wait_s = int(getattr(fe, "seconds", 60)) + 60
                             logger.warning(f"FloodWait: sleeping {wait_s}s")
@@ -1314,12 +1309,12 @@ async def health_check(event):
     if not event.is_private: return
     # Trust Report
     report = (
-        f"🛡️ **Aura V2.1 Trust Report**\n"
-        f"✅ Account Status: Active (Premium Shield)\n"
-        f"🛰️ Scouter State: Online\n"
-        f"👻 Ghost Mode: UA Rotation Engaged\n"
-        f"📍 Timezone: {os.environ.get('TZ', 'Standard')}\n"
-        f"📈 Growth Pattern: Randomized (5-12%)"
+        f"ðŸ›¡ï¸ **Aura V2.1 Trust Report**\n"
+        f"âœ… Account Status: Active (Premium Shield)\n"
+        f"ðŸ›°ï¸ Scouter State: Online\n"
+        f"ðŸ‘» Ghost Mode: UA Rotation Engaged\n"
+        f"ðŸ“ Timezone: {os.environ.get('TZ', 'Standard')}\n"
+        f"ðŸ“ˆ Growth Pattern: Randomized (5-12%)"
     )
     await event.reply(report)
 
@@ -1328,10 +1323,10 @@ async def sleep_bot(event):
     if not event.is_private: return
     try:
         hours = int(event.pattern_match.group(1))
-        await event.reply(f"💤 Entering Ghost Mode (Read-Only) for {hours} hours.")
+        await event.reply(f"ðŸ’¤ Entering Ghost Mode (Read-Only) for {hours} hours.")
         # In a real implementation, we would set a flag in shared state/DB
         await asyncio.sleep(hours * 3600)
-        await event.reply("🚀 Aiden is awake and back in scout mode.")
+        await event.reply("ðŸš€ Aiden is awake and back in scout mode.")
     except Exception:
         await event.reply("Usage: /sleep <hours>")
 
@@ -1339,17 +1334,17 @@ async def sleep_bot(event):
 async def reset_persona(event):
     if not event.is_private: return
     # Mimic human profile update
-    await event.reply("🔄 Refreshing profile metadata and persona hooks...")
+    await event.reply("ðŸ”„ Refreshing profile metadata and persona hooks...")
     # Logic to update bio/name randomly could go here
     await asyncio.sleep(5)
-    await event.reply("✅ Persona Reset: Digital footprint refreshed.")
+    await event.reply("âœ… Persona Reset: Digital footprint refreshed.")
 
 @client.on(events.NewMessage(pattern='/export'))
 async def export_db(event):
     if not event.is_private: return
     try:
         if os.path.exists(DB_FILE):
-            await client.send_file('me', DB_FILE, caption=f"🛰️ **Gold Leads Database Export**\nTime: {datetime.datetime.now()}")
+            await client.send_file('me', DB_FILE, caption=f"ðŸ›°ï¸ **Gold Leads Database Export**\nTime: {datetime.datetime.now()}")
         else:
             await event.reply("Database file not found.")
     except Exception as e:
@@ -1358,7 +1353,7 @@ async def export_db(event):
 async def historical_scan_loop():
     while True:
         try:
-            conn = sqlite3.connect(DB_FILE)
+            conn = sqlite3.connect(DB_FILE, timeout=30)
             c = conn.cursor()
             c.execute("SELECT group_id, last_scanned_id, title FROM joined_groups WHERE banned = 0")
             rows = c.fetchall()
@@ -1425,7 +1420,7 @@ async def historical_scan_loop():
                         max_id = m.id
                 if max_id and max_id != last_scanned_id:
                     try:
-                        conn2 = sqlite3.connect(DB_FILE)
+                        conn2 = sqlite3.connect(DB_FILE, timeout=30)
                         c2 = conn2.cursor()
                         c2.execute("UPDATE joined_groups SET last_scanned_id = ? WHERE group_id = ?", (max_id, group_id))
                         conn2.commit()
@@ -1442,14 +1437,14 @@ async def prune_dead_chats_loop():
     while True:
         try:
             cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)).isoformat()
-            conn = sqlite3.connect(DB_FILE)
+            conn = sqlite3.connect(DB_FILE, timeout=30)
             c = conn.cursor()
             c.execute("SELECT group_id, title FROM joined_groups WHERE banned = 0 AND archived = 0")
             rows = c.fetchall()
             conn.close()
             for group_id, title in rows:
                 try:
-                    conn2 = sqlite3.connect(DB_FILE)
+                    conn2 = sqlite3.connect(DB_FILE, timeout=30)
                     c2 = conn2.cursor()
                     c2.execute("SELECT COUNT(*) FROM prospects WHERE group_id = ? AND message_ts >= ?", (group_id, cutoff))
                     cnt = c2.fetchone()[0]
@@ -1466,7 +1461,7 @@ async def prune_dead_chats_loop():
                     except Exception as e:
                         logger.error(f"Prune leave error: {e}")
                     try:
-                        conn3 = sqlite3.connect(DB_FILE)
+                        conn3 = sqlite3.connect(DB_FILE, timeout=30)
                         c3 = conn3.cursor()
                         c3.execute("UPDATE joined_groups SET archived = 1 WHERE group_id = ?", (group_id,))
                         conn3.commit()
@@ -1485,7 +1480,7 @@ async def stats_report():
         await asyncio.sleep(43200) # 12h
         try:
             stats = load_json(STATS_FILE, apex_supreme_stats)
-            conn = sqlite3.connect(DB_FILE)
+            conn = sqlite3.connect(DB_FILE, timeout=30)
             try:
                 count = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
             except:
@@ -1531,7 +1526,7 @@ async def stats_report():
                     else:
                         if now_ts - zero_since >= 43200: # 12h
                             try:
-                                await client.send_message('me', "⚠️ Shadowban suspected: responses 0% for 12h. Switch to backup session.")
+                                await client.send_message('me', "âš ï¸ Shadowban suspected: responses 0% for 12h. Switch to backup session.")
                             except Exception:
                                 pass
                             stats["shadowban_alerted"] = True
@@ -1544,16 +1539,16 @@ async def stats_report():
                 logger.error(f"Shadowban check error: {e}")
 
             report = (
-                f"🛰️ **Aura Apex Supreme V2.1**\n"
-                f"💎 **Verified Gold Leads:** {count}\n"
-                f"🛡️ **Spam Auto-Purged:** {stats['spam_shielded']}\n"
-                f"👥 **Prospects Tracked:** {prospects_total}\n"
-                f"✉️ **Contacted/Responded:** {contacted}/{responded}\n"
-                f"🚫 **Opt-out:** {opt_outs} | ✅ Conversions: {conversions}\n"
-                f"📈 **Randomized Growth:** +{int(growth*100)}% Today\n"
-                f"📍 **Sync State:** Hardware Spoofing Active\n"
-                f"📈 **Day:** {stats['day_counter']} | **State:** 🟢\n"
-                f"🔍 **QC Groups:** {len(stats.get('qc_groups', []))}"
+                f"ðŸ›°ï¸ **Aura Apex Supreme V2.1**\n"
+                f"ðŸ’Ž **Verified Gold Leads:** {count}\n"
+                f"ðŸ›¡ï¸ **Spam Auto-Purged:** {stats['spam_shielded']}\n"
+                f"ðŸ‘¥ **Prospects Tracked:** {prospects_total}\n"
+                f"âœ‰ï¸ **Contacted/Responded:** {contacted}/{responded}\n"
+                f"ðŸš« **Opt-out:** {opt_outs} | âœ… Conversions: {conversions}\n"
+                f"ðŸ“ˆ **Randomized Growth:** +{int(growth*100)}% Today\n"
+                f"ðŸ“ **Sync State:** Hardware Spoofing Active\n"
+                f"ðŸ“ˆ **Day:** {stats['day_counter']} | **State:** ðŸŸ¢\n"
+                f"ðŸ” **QC Groups:** {len(stats.get('qc_groups', []))}"
             )
             await client.send_message('me', report)
         except Exception as e:
@@ -1643,7 +1638,7 @@ async def main():
             await client.start(phone=PHONE_NUMBER, code_callback=_code_callback, password=os.environ.get("TELEGRAM_PASSWORD"))
 
     await _start_with_retry()
-    print("🏰 Fortress V2.1 Active: Handshake + Hardware Spoofing + Randomized Growth.")
+    print("ðŸ° Fortress V2.1 Active: Handshake + Hardware Spoofing + Randomized Growth.")
     qc_ok = False
     try:
         qc_ok = await ensure_qc_group_joined()
@@ -1733,8 +1728,11 @@ if __name__ == '__main__':
                 time.sleep(60)
         else:
             keep_alive()
-            asyncio.run(main())
+            loop.run_until_complete(main())
     except KeyboardInterrupt:
         pass
     except Exception as e:
         logger.critical(f"Fatal Error: {e}")
+    finally:
+        loop.close()
+

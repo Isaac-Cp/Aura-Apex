@@ -57,7 +57,20 @@ HISTORICAL_KEYWORDS = ['freezing', 'down', 'expired', 'help', 'recommend', 'iptv
 # Search Terms
 SEARCH_TERMS = ["TiviMate Premium", "Smarters Pro Support", "IBO Player", "OttNavigator", "Firestick 4K Max", "Nvidia Shield TV", "UK Streaming Support", "USA Cord Cutters", "Premier League Live", "UFC PPV", "M3U Troubleshooting"]
 
-client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+# Explicit loop management for stability
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+try:
+    from telethon.sessions import StringSession
+    SESSION_STRING = os.getenv("SESSION_STRING")
+except ImportError:
+    SESSION_STRING = None
+
+if SESSION_STRING:
+    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH, loop=loop)
+else:
+    client = TelegramClient(SESSION_NAME, API_ID, API_HASH, loop=loop)
 
 groq_client = None
 aura_model = None
