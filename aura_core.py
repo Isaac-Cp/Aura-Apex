@@ -5,7 +5,6 @@ import os
 import random
 import time
 import sqlite3
-import sqlite3
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +54,7 @@ def keep_alive():
 
 def clean_old_logs(db_path, days=7):
     try:
-        conn = sqlite3.connect(db_path, timeout=30)
+        conn = sqlite3.connect(db_path, timeout=60)
         c = conn.cursor()
         try:
             c.execute("DELETE FROM prospects WHERE datetime(message_ts) < datetime('now', ?)", (f'-{int(days)} days',))

@@ -22,6 +22,9 @@
   - SESSION_STRING (recommended; generated locally, pasted in server env)
   - GROQ_API_KEY (optional, AI composing)
   - MARKET (optional: en-UK, en-US, es-ES, it-IT, de-DE, fr-FR)
+  - SKIP_WARMUP (optional: set to '1' to bypass initial warm-up wait)
+  - AURA_MODE (optional: 'testing' for faster intervals, 'production' for safety)
+  - AURA_WARMUP_SECONDS (optional: override default warm-up duration)
 - Koyeb:
   - Set env in Service → Settings → Environment variables and files
   - Exposed port: 8080
