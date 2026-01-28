@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import time
+import datetime
 from typing import List, Tuple
 
 import requests
@@ -19,16 +20,26 @@ REQUEST_TIMEOUT = 30
 CHECK_INTERVAL_SECONDS = 6 * 3600
 
 SYSTEM_PROMPT = (
-    "You are 'Aiden', a helpful friend sharing a useful find with an IPTV community.\n"
-    "Rules:\n"
-    "1. Use casual openers like 'Quick one —' or 'Just saw this —'.\n"
-    "2. No sales jargon. Keep human and practical.\n"
-    "3. Max 50 words. One or two short sentences.\n"
-    "4. Reference the source name.\n"
-    "5. End with a low-pressure note.\n"
+    "Act as Aiden, an expert in IPTV player optimization.\n"
+    "When you share a link:\n"
+    "- Use a casual opener like 'Quick one —' or 'Just saw this —'.\n"
+    "- Keep it under 50 words in 1–2 short sentences.\n"
+    "- Explain why the fix is better than just clearing cache.\n"
+    "- Include one concrete 'Pro Tip' beyond the summary.\n"
+    "- Reference the source name.\n"
+    "- End with a low-pressure note. No links inside the body."
 )
 
 ai_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
+IPTV_FILTER_KEYWORDS = [
+    "iptv", "tivimate", "smarters", "apk", "firestick",
+    "buffering", "dns", "m3u", "rebrand", "player", "epg"
+]
+
+def is_iptv_content(title: str, description: str = "") -> bool:
+    combined = ((title or "") + " " + (description or "")).lower()
+    return any(k in combined for k in IPTV_FILTER_KEYWORDS)
 
 def extract_links(text: str) -> List[str]:
     if not text:
@@ -56,7 +67,7 @@ def scrape_troypoint() -> List[Tuple[str, str, str]]:
             continue
         title = (a.get_text() or "").strip()
         link = (a.get("href") or "").strip()
-        if link and "/category/tutorials/" in "https://troypoint.com/category/tutorials/":
+        if link and is_iptv_content(title):
             items.append((title, link, "TROYPOINT"))
     return items
 
@@ -74,7 +85,7 @@ def scrape_aftvnews() -> List[Tuple[str, str, str]]:
             continue
         title = (a.get_text() or "").strip()
         link = (a.get("href") or "").strip()
-        if link:
+        if link and is_iptv_content(title):
             items.append((title, link, "AFTVnews"))
     return items
 
@@ -90,15 +101,36 @@ def scrape_torrentfreak() -> List[Tuple[str, str, str]]:
             continue
         title = (a.get_text() or "").strip()
         link = (a.get("href") or "").strip()
-        if link:
+        if link and is_iptv_content(title):
             items.append((title, link, "TorrentFreak"))
+    return items
+
+def scrape_reddit_detailediptv() -> List[Tuple[str, str, str]]:
+    html = get_html("https://old.reddit.com/r/DetailedIPTV/")
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    items = []
+    for a in soup.select("div#siteTable .thing a.title"):
+        title = (a.get_text() or "").strip()
+        link = (a.get("href") or "").strip()
+        if not link or not title:
+            continue
+        if is_iptv_content(title):
+            # Prefer external links; if relative, build full URL
+            if link.startswith("/"):
+                link = "https://old.reddit.com" + link
+            items.append((title, link, "Reddit r/DetailedIPTV"))
     return items
 
 async def humanize_post(source: str, title: str) -> str:
     base = f"Quick one — {title} ({source}). "
     if not ai_client:
-        return base + "worth a look if you’ve hit recent app/login snags."
-    user_msg = f"Turn this headline into a helpful, casual tip for IPTV users: {title}. Mention {source}."
+        return base + "pro tip: check player EPG refresh before any cache wipes."
+    user_msg = (
+        f"Rewrite this headline for IPTV specialists: {title}. "
+        f"Explain why this fix beats clearing cache. Add one concrete Pro Tip. Mention {source}."
+    )
     try:
         resp = await ai_client.chat.completions.create(
             messages=[
@@ -111,11 +143,11 @@ async def humanize_post(source: str, title: str) -> str:
         )
         text = (resp.choices[0].message.content or "").strip()
         text = re.sub(r'(https?://\S+|t\.me/\S+)', '', text)
-        if len(text) > 300:
-            text = text[:300]
+        if len(text) > 280:
+            text = text[:280]
         return text
     except Exception:
-        return base + "worth a look if you’ve hit recent app/login snags."
+        return base + "pro tip: check player EPG refresh before any cache wipes."
 
 async def load_recent_links(client: TelegramClient, channel_id: int) -> set:
     seen = set()
@@ -147,6 +179,48 @@ async def post_to_channel(client: TelegramClient, channel_id: int, source: str, 
     except Exception:
         return False
 
+async def count_today_posts(client: TelegramClient, channel_id: int) -> int:
+    try:
+        msgs = await client.get_messages(channel_id, limit=100)
+        today = datetime.datetime.utcnow().date()
+        c = 0
+        for m in msgs:
+            dt = getattr(m, "date", None)
+            txt = (getattr(m, "text", "") or "")
+            if dt and dt.date() == today and ("Source:" in txt):
+                c += 1
+        return c
+    except Exception:
+        return 0
+
+async def total_curator_posts_logged(client: TelegramClient) -> int:
+    try:
+        msgs = await client.get_messages('me', limit=200)
+        return sum(1 for m in msgs if (getattr(m, "text", "") or "").startswith("[Curator] Posted:"))
+    except Exception:
+        return 0
+
+async def maybe_post_soft_sale(client: TelegramClient, channel_id: int, today_count: int, global_count: int) -> bool:
+    try:
+        if today_count >= 3:
+            return False
+        # Post a soft sale on every 5th curator post
+        if (global_count + 1) % 5 == 0:
+            msg = (
+                "Just saw a flood of DNS workaround guides — annoying, right? "
+                "Pro Tip: Aura Apex rebranding hardcodes DNS and portal tweaks into the APK, "
+                "so users skip fixes entirely. DM for a demo."
+            )
+            await client.send_message(channel_id, msg)
+            try:
+                await client.send_message('me', "[Curator] SoftSale")
+            except Exception:
+                pass
+            return True
+        return False
+    except Exception:
+        return False
+
 async def curator_loop():
     chan_raw = CURATOR_CHANNEL_ID or ""
     try:
@@ -161,16 +235,26 @@ async def curator_loop():
         seen = await load_recent_links(client, channel_id)
         while True:
             try:
-                new_items = []
-                new_items.extend(scrape_troypoint())
-                new_items.extend(scrape_aftvnews())
-                new_items.extend(scrape_torrentfreak())
-                for title, link, source in new_items:
-                    if link in seen:
-                        continue
-                    ok = await post_to_channel(client, channel_id, source, title, link)
-                    if ok:
-                        seen.add(link)
+                today_count = await count_today_posts(client, channel_id)
+                global_count = await total_curator_posts_logged(client)
+                if today_count < 3:
+                    new_items = []
+                    new_items.extend(scrape_troypoint())
+                    new_items.extend(scrape_aftvnews())
+                    new_items.extend(scrape_torrentfreak())
+                    new_items.extend(scrape_reddit_detailediptv())
+                    for title, link, source in new_items:
+                        if today_count >= 3:
+                            break
+                        if link in seen:
+                            continue
+                        ok = await post_to_channel(client, channel_id, source, title, link)
+                        if ok:
+                            seen.add(link)
+                            today_count += 1
+                            global_count += 1
+                # Attempt soft-sale if eligible and under daily cap
+                await maybe_post_soft_sale(client, channel_id, today_count, global_count)
                 await asyncio.sleep(CHECK_INTERVAL_SECONDS)
             except Exception:
                 await asyncio.sleep(300)
