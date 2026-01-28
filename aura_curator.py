@@ -214,6 +214,27 @@ def append_local_link(link: str) -> None:
     except Exception:
         pass
 
+WELCOME_TAG = "[Aura Welcome]"
+WELCOME_MESSAGE = (
+    WELCOME_TAG + " Quick one — this channel shares IPTV fixes that actually matter "
+    "(player decoder, DNS/portal handshake, EPG sync). "
+    "Tired of patching? Aura Apex rebranding hardcodes stability into your APK, "
+    "so users stop fiddling with settings. DM for a demo and pricing."
+)
+
+async def ensure_welcome_message(client: TelegramClient, channel_id: int) -> None:
+    try:
+        msgs = await client.get_messages(channel_id, limit=10)
+        if any(((getattr(m, "text", "") or "").startswith(WELCOME_TAG)) for m in msgs):
+            return
+        msg = await client.send_message(channel_id, WELCOME_MESSAGE)
+        try:
+            await client.pin_message(channel_id, msg)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 async def post_to_channel(client: TelegramClient, channel_id: int, source: str, title: str, link: str):
     try:
         body = await humanize_post(source, title)
@@ -288,6 +309,7 @@ async def curator_loop():
     session = StringSession(SESSION_STRING) if SESSION_STRING else None
     client = TelegramClient(session or "aura_curator_session", int(API_ID), API_HASH)
     async with client:
+        await ensure_welcome_message(client, channel_id)
         seen = await load_recent_links(client, channel_id)
         seen |= load_local_links()
         while True:
