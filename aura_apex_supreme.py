@@ -753,6 +753,21 @@ def _load_targets():
             return json.load(f)
     except Exception:
         return {"niche_targets": [], "blacklist_patterns": []}
+def _load_targets_cached(ttl_sec: int = 300):
+    global _targets_cache, _targets_mtime, _targets_last_load_ts
+    try:
+        st = os.stat(TARGETS_FILE)
+        mtime = float(getattr(st, "st_mtime", 0.0))
+    except Exception:
+        mtime = 0.0
+    now = time.time()
+    if (_targets_cache is not None) and (mtime == _targets_mtime) and ((now - _targets_last_load_ts) < ttl_sec):
+        return _targets_cache
+    data = _load_targets()
+    _targets_cache = data
+    _targets_mtime = mtime
+    _targets_last_load_ts = now
+    return data
 def _persona_for_hook(hook):
     h = (hook or "").lower()
     if "sports" in h:
@@ -761,7 +776,7 @@ def _persona_for_hook(hook):
         return "concise"
     return random.choice(["expert", "peer", "concise"])
 def _hook_for_group_title(title):
-    data = _load_targets()
+    data = _load_targets_cached()
     t = (title or "").lower()
     for item in data.get("niche_targets", []):
         kws = [k.lower() for k in item.get("keywords", [])]
@@ -1077,6 +1092,9 @@ _ssl_ctx = None
 _http_session = None
 _last_conn_check_ts = 0.0
 _last_conn_status = False
+_targets_cache = None
+_targets_mtime = 0.0
+_targets_last_load_ts = 0.0
 async def db_writer_loop():
     try:
         conn = await aiosqlite.connect(DB_FILE)
@@ -1773,7 +1791,7 @@ async def fetch_from_tosearch(keyword: str, max_links: int = 10) -> List[str]:
     except Exception:
         return []
 def _targets_keywords():
-    data = _load_targets()
+    data = _load_targets_cached()
     out = []
     for item in data.get("niche_targets", []):
         out.extend(item.get("keywords", []))
