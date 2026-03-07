@@ -323,16 +323,24 @@ async def resolve_limiter_consume():
 async def join_limiter_consume():
     return await join_limiter.consume()
 async def ensure_connected():
+    global _last_conn_check_ts, _last_conn_status
+    now = time.time()
+    if (now - _last_conn_check_ts) < 10.0:
+        return _last_conn_status
+    _last_conn_check_ts = now
     try:
         if client.is_connected():
+            _last_conn_status = True
             return True
     except Exception as e:
         logger.debug(f"Connection check error: {e}")
     try:
         await client.connect()
+        _last_conn_status = True
         return True
     except Exception as e:
         logger.error(f"Failed to connect: {e}")
+        _last_conn_status = False
         return False
 SELLER_SHIELD_TERMS = [
     "reseller", "resellers", "reseller wanted", "reseller program",
@@ -1057,6 +1065,18 @@ SELLER_NEGATIVE_KEYWORDS = ["reseller", "panel", "credits", "wholesale", "restre
 SELLER_NEGATIVE_KEYWORDS += ["recruitment", "become reseller", "opportunity", "earn", "profit", "white label panel", "partner program", "affiliate", "bulk", "marketing group", "dealer program", "franchise"]
 BLACKLIST_JOIN = ["spam", "crypto-pump", "adult"]
 DB_QUEUE = asyncio.Queue()
+_TITLE_TARGET_KEYWORDS_SET = set(k.lower() for k in TITLE_TARGET_KEYWORDS)
+_SELLER_SHIELD_TERMS_SET = set(k.lower() for k in SELLER_SHIELD_TERMS)
+_BLACKLIST_JOIN_SET = set(k.lower() for k in BLACKLIST_JOIN)
+_MARKETING_ADV_HIGH = {"dm me","dm for service","dm for price","pm for price","inbox for price","order now","place order","order","price","prices","pricing"}
+_MARKETING_ADV_MED = {"buy","sell","subscribe","subscription","offer","deal","affiliate","bulk","dealer","franchise","supplier","restream","panel","credits","wholesale"}
+_MARKETING_LINKS = {"t.me","http","https"}
+_MARKETING_Q_LOW = {"why","how","help","lag"}
+_MARKETING_TECH = {"tivimate","firestick","smarters","xciptv","televizo","mag","stb","portal","dns","buffer","latency"}
+_ssl_ctx = None
+_http_session = None
+_last_conn_check_ts = 0.0
+_last_conn_status = False
 async def db_writer_loop():
     try:
         conn = await aiosqlite.connect(DB_FILE)
@@ -1282,23 +1302,18 @@ def marketing_sentiment_score(text):
     t = (text or "").lower()
     if not t:
         return 100
-    adv_high = ["dm me","dm for service","dm for price","pm for price","inbox for price","order now","place order","order","price","prices","pricing"]
-    adv_medium = ["buy","sell","subscribe","subscription","offer","deal","affiliate","bulk","dealer","franchise","supplier","restream","panel","credits","wholesale"]
-    links = ["t.me","http","https"]
-    q_low = ["why","how","help","lag"]
-    tech_keys = ["tivimate","firestick","smarters","xciptv","televizo","mag","stb","portal","dns","buffer","latency"]
     currency = any(sym in t for sym in ["$", "€", "£"])
     pos = 0
-    pos += sum(1 for k in adv_high if k in t) * 20
-    pos += sum(1 for k in adv_medium if k in t) * 10
-    pos += sum(1 for k in links if k in t) * 5
+    pos += sum(1 for k in _MARKETING_ADV_HIGH if k in t) * 20
+    pos += sum(1 for k in _MARKETING_ADV_MED if k in t) * 10
+    pos += sum(1 for k in _MARKETING_LINKS if k in t) * 5
     if currency:
         pos += 20
     neg = 0
-    neg += sum(1 for k in q_low if k in t) * 12
+    neg += sum(1 for k in _MARKETING_Q_LOW if k in t) * 12
     neg += (15 if "?" in t else 0)
     score = 50 + pos - neg
-    if "?" in t and any(k in t for k in tech_keys):
+    if "?" in t and any(k in t for k in _MARKETING_TECH):
         score -= 50
     if score < 0:
         score = 0
@@ -1406,15 +1421,15 @@ def _candidate_score(ident, title):
         return 0
 def _title_hit(title):
     t = (title or "").lower()
-    return any(k in t for k in TITLE_TARGET_KEYWORDS)
+    return any(k in t for k in _TITLE_TARGET_KEYWORDS_SET)
 def _title_buyer_hit(title):
     t = (title or "").lower()
     return any(k.lower() in t for k in BUYER_PAIN_KEYWORDS)
 def _blacklisted(title):
     t = (title or "").lower()
-    if any(k in t for k in BLACKLIST_JOIN):
+    if any(k in t for k in _BLACKLIST_JOIN_SET):
         return True
-    return any(k in t for k in SELLER_SHIELD_TERMS)
+    return any(k in t for k in _SELLER_SHIELD_TERMS_SET)
 async def _log_join_event_async(link, title, status, reason):
     try:
         items = await load_json_async(JOIN_ATTEMPTS_LOG, [])
@@ -1593,42 +1608,46 @@ async def _scrape_search_pages(keyword: str, max_links: int = 10) -> List[str]:
     try:
         headers = {"User-Agent": get_ghost_ua()}
         links = []
-        ssl_ctx = ssl.create_default_context(cafile=certifi.where())
-        
-        async with aiohttp.ClientSession(headers=headers) as session:
-            # 1. DuckDuckGo HTML Search (Robust)
-            try:
-                ddg_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(keyword + ' site:t.me')}"
-                for _ in range(3):
-                    try:
-                        async with session.get(ddg_url, timeout=15, ssl=ssl_ctx) as r0:
-                            if r0.status == 200:
-                                html = await r0.text()
-                                soup0 = BeautifulSoup(html, "html.parser")
-                                for a in soup0.find_all("a", href=True):
-                                    href = a["href"]
-                                    if "uddg=" in href:
-                                        try:
-                                            from urllib.parse import unquote
-                                            href = unquote(href.split("uddg=")[1].split("&")[0])
-                                        except Exception as e:
-                                            logger.debug(f"DDG unquote error: {e}")
-                                    if "t.me/" in href and not "t.me/s/" in href:
-                                        clean = href.split("?")[0].strip()
-                                        if clean.startswith("https://t.me/"):
-                                            links.append(clean)
-                                break
-                    except Exception:
-                        await asyncio.sleep(1.0)
-            except Exception as e:
-                logger.warning(f"DDG Scrape error: {e}")
+        global _ssl_ctx
+        if _ssl_ctx is None:
+            _ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+        global _http_session
+        if _http_session is None or _http_session.closed:
+            _http_session = aiohttp.ClientSession()
+        session = _http_session
+        # 1. DuckDuckGo HTML Search (Robust)
+        try:
+            ddg_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(keyword + ' site:t.me')}"
+            for _ in range(3):
+                try:
+                    async with session.get(ddg_url, timeout=15, ssl=_ssl_ctx, headers=headers) as r0:
+                        if r0.status == 200:
+                            html = await r0.text()
+                            soup0 = BeautifulSoup(html, "html.parser")
+                            for a in soup0.find_all("a", href=True):
+                                href = a["href"]
+                                if "uddg=" in href:
+                                    try:
+                                        from urllib.parse import unquote
+                                        href = unquote(href.split("uddg=")[1].split("&")[0])
+                                    except Exception as e:
+                                        logger.debug(f"DDG unquote error: {e}")
+                                if "t.me/" in href and "t.me/s/" not in href:
+                                    clean = href.split("?")[0].strip()
+                                    if clean.startswith("https://t.me/"):
+                                        links.append(clean)
+                            break
+                except Exception:
+                    await asyncio.sleep(1.0)
+        except Exception as e:
+            logger.warning(f"DDG Scrape error: {e}")
 
             # 2. TGStat (Existing)
             try:
                 url = f"https://tgstat.com/search?query={urllib.parse.quote(keyword)}&lang=en"
                 for _ in range(2):
                     try:
-                        async with session.get(url, timeout=15, ssl=ssl_ctx) as r:
+                        async with session.get(url, timeout=15, ssl=_ssl_ctx, headers=headers) as r:
                             if r.status == 200:
                                 html = await r.text()
                                 soup = BeautifulSoup(html, "html.parser")
@@ -1648,7 +1667,7 @@ async def _scrape_search_pages(keyword: str, max_links: int = 10) -> List[str]:
                 url2 = f"https://telegramchannels.me/search?q={urllib.parse.quote(keyword)}"
                 for _ in range(2):
                     try:
-                        async with session.get(url2, timeout=15, ssl=ssl_ctx) as r2:
+                        async with session.get(url2, timeout=15, ssl=_ssl_ctx, headers=headers) as r2:
                             if r2.status == 200:
                                 html = await r2.text()
                                 soup2 = BeautifulSoup(html, "html.parser")
@@ -1667,7 +1686,7 @@ async def _scrape_search_pages(keyword: str, max_links: int = 10) -> List[str]:
                 url3 = f"https://telemetr.io/search?q={urllib.parse.quote(keyword)}"
                 for _ in range(2):
                     try:
-                        async with session.get(url3, timeout=15, ssl=ssl_ctx) as r3:
+                        async with session.get(url3, timeout=15, ssl=_ssl_ctx, headers=headers) as r3:
                             if r3.status == 200:
                                 html = await r3.text()
                                 soup3 = BeautifulSoup(html, "html.parser")
@@ -2033,7 +2052,7 @@ async def potential_targets_dedupe_loop():
             pass
         await asyncio.sleep(86400)
 
-async def performance_monitor(duration_sec=2400, sample_interval=10):
+async def performance_monitor(duration_sec=2400, sample_interval=10, connectivity_every=5):
     start = time.time()
     proc = None
     try:
@@ -2053,7 +2072,9 @@ async def performance_monitor(duration_sec=2400, sample_interval=10):
             s = {"ts": time.time()}
             if psutil:
                 try:
-                    s["cpu_percent"] = psutil.cpu_percent(interval=0.2)
+                    # Non-blocking CPU sampling to reduce overhead
+                    _ = psutil.cpu_percent(interval=None)
+                    s["cpu_percent"] = psutil.cpu_percent(interval=None)
                     max_cpu = max(max_cpu, float(s["cpu_percent"]))
                 except Exception:
                     s["cpu_percent"] = None
@@ -2068,18 +2089,19 @@ async def performance_monitor(duration_sec=2400, sample_interval=10):
                 except Exception:
                     s["num_threads"] = None
             try:
-                await ensure_connected()
-                ok = False
-                try:
-                    _ = await client.get_dialogs(limit=1)
-                    ok = True
-                except Exception:
+                if int((time.time() - start) / sample_interval) % max(1, int(connectivity_every)) == 0:
+                    await ensure_connected()
                     ok = False
-                s["tg_connectivity"] = "ok" if ok else "fail"
-                if ok:
-                    connectivity_ok += 1
-                else:
-                    connectivity_fail += 1
+                    try:
+                        _ = await client.get_dialogs(limit=1)
+                        ok = True
+                    except Exception:
+                        ok = False
+                    s["tg_connectivity"] = "ok" if ok else "fail"
+                    if ok:
+                        connectivity_ok += 1
+                    else:
+                        connectivity_fail += 1
             except Exception:
                 s["tg_connectivity"] = "fail"
                 connectivity_fail += 1
