@@ -1,1 +1,1 @@
-web: python aura_apex_supreme.py
+web: python main.py

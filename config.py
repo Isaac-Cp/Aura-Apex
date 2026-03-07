@@ -1,8 +1,22 @@
 
 import os
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
+
+def load_json_config(path, default):
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default
+    return default
+
+# Load rules from external JSON
+RULES_PATH = os.path.join("data", "rules.json")
+rules = load_json_config(RULES_PATH, {})
 
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
@@ -13,69 +27,46 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 CURATOR_CHANNEL_ID = os.getenv("CURATOR_CHANNEL_ID")
 TARGET_CHANNEL_ID = os.getenv("TARGET_CHANNEL_ID")
 CHANNEL_INVITE_LINK = os.getenv("CHANNEL_INVITE_LINK")
+ADMIN_LEADS_CHANNEL_ID = os.getenv("ADMIN_LEADS_CHANNEL_ID")
+DB_FILE = os.getenv("DB_FILE", "gold_leads.db")
+WAITING_FOR_CODE_FILE = "WAITING_FOR_CODE"
+BLACKLIST_FILE = "blacklist.txt"
+KEEP_ALIVE_SECRET = os.getenv("KEEP_ALIVE_SECRET", "changeme")
 
-BANNED_ZONES = [
-    "AF", "AL", "DZ", "AO", "BY", "BO", "VG", "BF", "BI", "CM", "CF", "TD", "CU", "CD",
-    "ER", "GN", "GW", "HT", "IR", "IQ", "KP", "LA", "LB", "LY", "ML", "MD", "MC", "MZ",
-    "MM", "NA", "NP", "NI", "NE", "NG", "PK", "PS", "RU", "SO", "SS", "SD", "SY", "TJ",
-    "TT", "TN", "UA", "UZ", "VU", "VE", "VN", "YE", "BD", "TR", "SD", "ZW"
-]
+BANNED_ZONES = rules.get("BANNED_ZONES", [])
+BANNED_CURRENCIES = rules.get("BANNED_CURRENCIES", [])
+JUNK_KEYWORDS = rules.get("JUNK_KEYWORDS", [])
+TIER_3_CODES = rules.get("TIER_3_CODES", [])
+TIER_1_INDICATORS = rules.get("TIER_1_INDICATORS", [])
+URGENCY_KEYWORDS = rules.get("URGENCY_KEYWORDS", [])
+SENTIMENT_BLACKLIST = rules.get("SENTIMENT_BLACKLIST", [])
+REBRAND_KEYWORDS = rules.get("REBRAND_KEYWORDS", [])
+COMMERCIAL_KEYWORDS = rules.get("COMMERCIAL_KEYWORDS", [])
+COMPETITOR_KEYWORDS = rules.get("COMPETITOR_KEYWORDS", [])
+NEGATIVE_TRIGGERS = rules.get("NEGATIVE_TRIGGERS", [])
+MARKET_KEYWORDS = rules.get("MARKET_KEYWORDS", {})
 
-BANNED_CURRENCIES = [
-    "AFN", "AOA", "ARS", "BYN", "BOB", "CDF", "CUP", "ERN", "ETB", "GHS", "GNF", "HTG",
-    "IRR", "IQD", "KPW", "LAK", "LBP", "LRD", "LYD", "MGA", "MWK", "MMK", "MZN", "NGN",
-    "PKR", "PYG", "SLL", "SOS", "SSP", "SDG", "SYP", "TJS", "TRY", "TMT", "UGX", "UZS",
-    "VES", "VND", "YER", "ZMW", "ZWL", "KHR", "LKR", "RSD", "GEL", "AMD", "AZN", "KGS"
-]
+REQUEST_TIMEOUT = 30
+CHECK_INTERVAL_SECONDS = 300 if os.environ.get("AURA_MODE", "").lower() == "testing" else 6 * 3600
 
-JUNK_KEYWORDS = [
-    "100% free", "cracked", "bin", "carding", "hack", "giveaway", "follow4follow",
-    "sub4sub", "megalink", "cheap vcc", "premium apk free", "unlimited credits",
-    "no payment needed", "leak", "dump", "tutorial free", "bypass paywall",
-    "get rich fast", "instant cash", "verified cc", "fullz", "scampage", "phishing",
-    "spammer", "promo code 100", "free trial no card", "unlimited trial", "bot for hire",
-    "dm for link", "visit my channel", "cheap followers", "crypto signal free", "airdrop",
-    "gift card generator", "cracked firestick", "unlocked box", "free m3u list",
-    "daily m3u", "iptv link free", "xtream codes free", "login free", "password list",
-    "stbemu free", "mac portal free", "free activation", "no cost", "complimentary",
-    "gifted", "hidden link", "earn money"
-]
+BRAND_COLORS = [(12, 20, 35), (22, 32, 48), (255, 215, 0)]
 
-TIER_3_CODES = [
-    "PH", "IN", "BR", "MX", "DZ", "MA", "EG", "ZA", "CO", "MY", "TH", "PE", "KE", "BD",
-    "AR", "CL", "EC", "GT", "HN", "ID", "JO", "KZ", "KW", "KG", "LY", "MU", "MN", "ME",
-    "OM", "PA", "QA", "SA", "RS", "LK", "TW", "TJ", "UA", "AE", "UY", "UZ", "VN", "GH",
-    "CI", "SN", "TZ", "UG", "ZM", "ZW", "NP"
-]
+PLATFORM_SPECS = {
+    "4k": (3840, 2160),
+    "instagram_square": (1080, 1080),
+    "instagram_portrait": (1080, 1350),
+    "instagram_landscape": (1080, 566),
+    "twitter_large": (1200, 675),
+    "twitter_small": (600, 335),
+    "facebook_large": (1200, 630),
+    "facebook_square": (1080, 1080)
+}
 
-TIER_1_INDICATORS = [
-    "UK", "USA", "CA", "DE", "FR", "AU", "CH", "NL", "NO", "SE", "JP", "IE", "NZ", "AT",
-    "BE", "DK", "FI", "IS", "IT", "LU", "SG", "ES", "KR", "HK", "IL", "PT", "GR", "CZ",
-    "HU", "PL", "RO", "SK", "SI", "EE", "LV", "LT", "MT", "CY", "US", "GB", "Great Britain",
-    "America", "Canada", "Australia", "Germany", "France", "Switzerland", "Netherlands", "Sweden"
-]
-
-URGENCY_KEYWORDS = [
-    "immediately", "now", "trial link", "ready to pay", "kickoff", "help urgent",
-    "expiring", "renewal", "black screen", "looping", "buffering during", "admin help",
-    "buy credits now", "setup guide", "asap", "starting in 5", "can't login",
-    "payment portal", "buy now", "active subscription", "urgent fix", "match live",
-    "ppv link", "pay via crypto", "paypal ready", "stripe link", "instant delivery",
-    "activate now", "working link", "stable server", "no lag", "high speed", "8k stream",
-    "4k stable", "reliable", "best provider", "recommend me", "looking for", "need new",
-    "switch provider", "too much buffering", "service down", "offline", "not responding",
-    "portal error", "m3u fix", "playlist error", "dns change", "server move"
-]
-
-SENTIMENT_BLACKLIST = [
-    "scam", "fraud", "stole", "avoid", "fake", "bad service", "liar", "thief", "terrible",
-    "don't buy", "garbage", "waste of money", "stay away", "blocked me", "refused refund",
-    "admin is scammer", "fake proof", "stolen", "ripped off", "cheated", "unreliable",
-    "slow support", "never reply", "don't trust", "warning", "be careful", "danger",
-    "malware", "virus", "hacked", "identity theft", "police", "legal action", "sue",
-    "complaint", "worst", "horrible", "awful", "disaster", "ruined", "disappointed",
-    "poor quality", "pixelated", "freezing constantly", "total scam", "do not use",
-    "don't subscribe", "stolen mac", "portal dead"
+PRO_TIPS = [
+    "Switch decoder to Software when OS updates cause stutter.",
+    "Use a stable DNS; avoid public resolvers that leak and flap.",
+    "Keep EPG refresh at 24h to prevent provider rate-limit spikes.",
+    "Prefer wired Ethernet for 4K; Wi‑Fi jitter ruins handshake stability."
 ]
 
 if not API_ID or not API_HASH or not PHONE_NUMBER:

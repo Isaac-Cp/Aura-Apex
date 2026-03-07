@@ -17,9 +17,15 @@ def home():
 def health():
     return "OK", 200
 
+from config import KEEP_ALIVE_SECRET
+
 @app.route('/code', methods=['POST'])
 def set_code():
     try:
+        api_key = request.headers.get("X-API-Key") or request.args.get("api_key")
+        if api_key != KEEP_ALIVE_SECRET:
+            return ("Unauthorized", 401)
+        
         code = None
         if request.is_json:
             data = request.get_json(silent=True) or {}
@@ -28,6 +34,8 @@ def set_code():
             code = (request.form.get("code") or "").strip()
         if not code:
             return ("Missing code", 400)
+        if len(code) > 100:
+            return ("Code too long", 400)
         path = os.path.join(os.getcwd(), "WAITING_FOR_CODE")
         with open(path, "w", encoding="utf-8") as f:
             f.write(code)
@@ -47,3 +55,6 @@ def keep_alive():
     t = Thread(target=run)
     t.daemon = True
     t.start()
+
+if __name__ == "__main__":
+    run()

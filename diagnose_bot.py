@@ -1,17 +1,25 @@
 import os
-import sqlite3
+import asyncio
+import aiosqlite
 import datetime
 from dotenv import load_dotenv
+from aura_core import setup_logging
+from config import DB_FILE
+
+# Configure logging
+setup_logging()
+import logging
+logger = logging.getLogger("DiagnoseBot")
 
 load_dotenv()
 
-print("--- ENV VAR CHECK ---")
+logger.info("--- ENV VAR CHECK ---")
 market = os.getenv("MARKET")
-print(f"MARKET: {market}")
+logger.info(f"MARKET: {market}")
 api_id = os.getenv("API_ID")
-print(f"API_ID set: {bool(api_id)}")
+logger.info(f"API_ID set: {bool(api_id)}")
 
-print("\n--- MARKET HOUR CHECK ---")
+logger.info("\n--- MARKET HOUR CHECK ---")
 def market_hour_ok():
     mk = (market or "").lower()
     offsets = {
@@ -20,27 +28,34 @@ def market_hour_ok():
     off = offsets.get(mk, 0)
     now_utc = datetime.datetime.utcnow()
     h = (now_utc + datetime.timedelta(hours=off)).hour
-    print(f"Market: {mk}, Offset: {off}, UTC Hour: {now_utc.hour}, Local Hour: {h}")
+    logger.info(f"Market: {mk}, Offset: {off}, UTC Hour: {now_utc.hour}, Local Hour: {h}")
     return 9 <= h <= 21
 
 is_ok = market_hour_ok()
-print(f"Market Open: {is_ok}")
+logger.info(f"Market Open: {is_ok}")
 
-print("\n--- DB LOCK CHECK ---")
-try:
-    conn = sqlite3.connect("gold_leads.db", timeout=5)
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode;")
-    mode = cursor.fetchone()
-    print(f"Journal Mode: {mode}")
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-    tables = cursor.fetchall()
-    print(f"Tables: {tables}")
-    for table in tables:
-        cursor.execute(f"SELECT count(*) FROM {table[0]};")
-        count = cursor.fetchone()[0]
-        print(f"Table {table[0]} count: {count}")
-    conn.close()
-    print("DB Check: SUCCESS")
-except Exception as e:
-    print(f"DB Check: FAILED - {e}")
+async def check_db():
+    logger.info("\n--- DB LOCK CHECK ---")
+    try:
+        async with aiosqlite.connect(DB_FILE, timeout=5) as conn:
+            async with conn.execute("PRAGMA journal_mode;") as cursor:
+                mode = await cursor.fetchone()
+                logger.info(f"Journal Mode: {mode}")
+            
+            async with conn.execute("SELECT name FROM sqlite_master WHERE type='table';") as cursor:
+                tables = await cursor.fetchall()
+                logger.info(f"Tables: {tables}")
+            
+            for table in tables:
+                async with conn.execute(f"SELECT count(*) FROM {table[0]};") as cursor:
+                    count = (await cursor.fetchone())[0]
+                    logger.info(f"Table {table[0]} count: {count}")
+        logger.info("DB Check: SUCCESS")
+    except Exception as e:
+        logger.error(f"DB Check: FAILED - {e}")
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(check_db())
+    except Exception as e:
+        logger.error(f"Fatal Error: {e}")

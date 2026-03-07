@@ -1,4 +1,4 @@
-
+from typing import Optional, List, Dict, Any, Union, Tuple
 import asyncio
 import logging
 import logging.handlers
@@ -7,8 +7,13 @@ import sys
 import datetime
 import os
 import re
-import sqlite3
 import time
+import hashlib
+import urllib.parse
+import ssl
+import certifi
+import aiohttp
+from bs4 import BeautifulSoup
 import aiosqlite
 
 from telethon import TelegramClient, events, functions
@@ -18,6 +23,7 @@ from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
 from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest, GetFullChannelRequest
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
 from telethon.tl.functions.users import GetFullUserRequest
+from telethon.tl import types
 from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings, ReactionEmoji, UserStatusOffline, UserStatusOnline, UserStatusRecently, UserStatusLastWeek, UserStatusLastMonth
 from telethon.errors import FloodWaitError, UserPrivacyRestrictedError, PeerIdInvalidError, YouBlockedUserError, UserBannedInChannelError, ChatWriteForbiddenError, ChannelPrivateError, PeerFloodError
 from telethon.tl.functions.contacts import BlockRequest
@@ -25,28 +31,54 @@ from fake_useragent import UserAgent
 from groq import AsyncGroq
 from deep_translator import GoogleTranslator
 
+try:
+    import praw
+except Exception:
+    praw = None
+try:
+    import psutil
+except Exception:
+    psutil = None
+
 # Custom modules
 from aura_core import (
-    proxy_health_monitor, should_outreach, load_json, save_json, clean_old_logs,
-    calculate_lead_score, REBRAND_KEYWORDS, URGENCY_KEYWORDS, COMPETITOR_KEYWORDS
+    proxy_health_monitor, should_outreach, load_json, save_json, clean_old_logs_async,
+    calculate_lead_score, REBRAND_KEYWORDS, URGENCY_KEYWORDS, COMPETITOR_KEYWORDS,
+    setup_logging, load_json_async, save_json_async
 )
 from keep_alive import keep_alive
 from config import (
     API_ID, API_HASH, PHONE_NUMBER, GROQ_API_KEY,
     BANNED_ZONES, BANNED_CURRENCIES, JUNK_KEYWORDS, 
-    TIER_3_CODES, TIER_1_INDICATORS, URGENCY_KEYWORDS, SENTIMENT_BLACKLIST
+    TIER_3_CODES, TIER_1_INDICATORS, URGENCY_KEYWORDS, SENTIMENT_BLACKLIST, ADMIN_LEADS_CHANNEL_ID,
+    DB_FILE, MARKET_KEYWORDS
 )
 from config import SESSION_STRING as CONFIG_SESSION_STRING
 
 # Logging Setup
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+setup_logging()
 logger = logging.getLogger(__name__)
-try:
-    _fh = logging.handlers.RotatingFileHandler('bot_error.log', maxBytes=1000000, backupCount=3, encoding='utf-8')
-    _fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logger.addHandler(_fh)
-except Exception as e:
-    print(f"Logging setup warning: {e}")
+
+def validate_startup_secrets():
+    errs = []
+    if not API_ID or not str(API_ID).isdigit() or int(API_ID) <= 0:
+        errs.append("Invalid API_ID")
+    if not API_HASH or not re.fullmatch(r'[0-9a-fA-F]{32}', str(API_HASH)):
+        errs.append("Invalid API_HASH")
+    phone = (PHONE_NUMBER or "").strip()
+    if not phone or not re.fullmatch(r'\+?[0-9]{10,15}', phone):
+        errs.append("Invalid PHONE_NUMBER")
+    sess = (CONFIG_SESSION_STRING or os.environ.get("SESSION_STRING") or "").strip()
+    if not sess or len(sess) < 50:
+        errs.append("Missing or invalid SESSION_STRING")
+    groq_key = (os.environ.get("GROQ_API_KEY") or "").strip()
+    gem_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_APIKEY") or "").strip()
+    if not groq_key and not gem_key:
+        errs.append("Missing AI provider key (GROQ_API_KEY or GEMINI_API_KEY)")
+    if errs:
+        for e in errs:
+            logger.critical(e)
+        sys.exit(1)
 
 # AI Provider Setup (Groq)
 ai_client = None
@@ -64,59 +96,321 @@ SYSTEM_PROMPT = (
     "STRICT RULES:\n"
     "1. NO FORMAL GREETINGS: Use \"Hey\", \"Yo\", or \"Quick one\". Never \"Dear\" or \"Hello\".\n"
     "2. NO SALES JARGON: Avoid \"innovative\", \"solution\", \"guarantee\", or \"best-in-class\".\n"
-    "3. BREVITY: Maximum 40 words. Use 1-2 short sentences.\n"
+    "3. BREVITY: Maximum 120 words. Use 3-5 short sentences.\n"
     "4. TONE: Peer-to-peer, slightly informal. Use lowercase occasionally like a mobile user.\n"
     "5. CONTEXT: Always reference the group and the specific problem they mentioned.\n"
     "6. CTA: End with a low-pressure question, not a link."
 )
 
-async def generate_ai_dm(lead_name, group_name, user_msg, lead_score, context_hint, style_hint):
+OPENERS_HIGH = [
+    "Saw your note in {group}.",
+    "Caught your message in {group}.",
+    "Noticed your post in {group}.",
+]
+OPENERS_LOW = [
+    "Quick thought on that issue.",
+    "If helpful, here’s a fast fix.",
+    "Sharing a simple checklist.",
+]
+CTAS_HIGH = [
+    "Want a 2‑min checklist?",
+    "Can I send a tiny fix plan?",
+    "Want a quick diagnostic?",
+]
+CTAS_LOW = [
+    "Want a quick tip?",
+    "Can I share a short guide?",
+    "Want a tiny checklist?",
+]
+
+def _sanitize_dm(dm: str) -> str:
+    dm = re.sub(r'(https?://\S+|t\.me/\S+)', '', dm)
+    dm = re.sub(r'[\u2600-\u27BF\U0001F300-\U0001FAFF]+', '', dm)
+    dm = re.sub(r'\s+', ' ', dm).strip()
+    words = dm.split()
+    if len(words) > 40:
+        dm = ' '.join(words[:40])
+    return dm
+
+def _fallback_dm(lead_name: str, group_name: str, user_msg: str, lead_score: int) -> str:
+    opener = random.choice(OPENERS_HIGH if lead_score >= 7 else OPENERS_LOW).format(group=group_name)
+    cta = random.choice(CTAS_HIGH if lead_score >= 7 else CTAS_LOW)
+    base = f"{opener} {lead_name}, looks like you’re dealing with that. {cta}"
+    return _sanitize_dm(base)
+
+async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_score: int, context_hint: str, style_hint: str) -> str:
     if not ai_client:
-        return None
+        return _fallback_dm(lead_name, group_name, user_msg, lead_score)
     intent_focus = "focus on fixing their technical issue/buffering"
     if lead_score >= 7:
-        intent_focus = "casually mention our 'Aura Apex' rebranding service as the ultimate fix"
+        intent_focus = "briefly mention our rebranding service only if relevant"
     up = (
         f"Lead Name: {lead_name}\n"
         f"Group Found In: {group_name}\n"
         f"What they said: \"{user_msg}\"\n"
-        f"Instruction: {intent_focus}. {style_hint}. {context_hint}."
+        f"Instruction: {intent_focus}. {style_hint}. {context_hint}. "
+        f"Reply in ≤40 words, no links, no emojis, one soft CTA."
     )
-    resp = await ai_client.chat.completions.create(
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": up}
-        ],
-        model="llama-3.3-70b-versatile",
-        temperature=0.7,
-        max_tokens=60
-    )
-    dm = (resp.choices[0].message.content or "").strip()
-    dm = re.sub(r'(https?://\S+|t\.me/\S+)', '', dm)
-    return dm
-async def safe_send_dm(client, peer, message):
     try:
-        async with client.action(peer, 'typing'):
-            await asyncio.sleep(random.uniform(3, 7))
-            await client.send_message(peer, message)
-        return True
-    except FloodWaitError as e:
+        resp = await ai_client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": up}
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.6,
+            max_tokens=64
+        )
+        dm = (resp.choices[0].message.content or "").strip()
+        return _sanitize_dm(dm)
+    except Exception:
+        return _fallback_dm(lead_name, group_name, user_msg, lead_score)
+DM_ATTEMPTS_LOG = "dm_attempts.json"
+DM_COOLDOWN_HOURS = 48
+
+def _now_ts() -> float:
+    return time.time()
+
+def _quiet_hours(local_hour: int) -> bool:
+    return local_hour >= 22 or local_hour < 7
+def _market_tzinfo():
+    try:
+        m = (MARKET or "").lower()
+        if m in ("en-us", "us", "usa"):
+            return datetime.timezone(datetime.timedelta(hours=-5))
+        if m in ("en-uk", "uk", "gb"):
+            return datetime.timezone(datetime.timedelta(hours=0))
+        if m in ("en-eu", "eu"):
+            return datetime.timezone(datetime.timedelta(hours=1))
+        if m in ("es-es", "es", "spain"):
+            return datetime.timezone(datetime.timedelta(hours=1))
+        if m in ("it-it", "it", "italy"):
+            return datetime.timezone(datetime.timedelta(hours=1))
+        return None
+    except Exception as e:
+        logger.debug(f"Timezone info error: {e}")
+        return None
+
+def _normalize_key(uid: str, text: str) -> str:
+    text = re.sub(r'\s+', ' ', (text or '')).strip().lower()
+    return hashlib.sha1(f"{uid}:{text}".encode("utf-8")).hexdigest()
+
+def _load_dm_log() -> list:
+    # Use sync load for initialization if needed, but this function seems to be called in async context
+    # However, safe_send_dm is async, so we should convert this to async if possible.
+    # For now, let's keep it sync here but use async in safe_send_dm
+    try:
+        return load_json(DM_ATTEMPTS_LOG, [])
+    except Exception:
+        return []
+
+async def _load_dm_log_async() -> list:
+    try:
+        return await load_json_async(DM_ATTEMPTS_LOG, [])
+    except Exception:
+        return []
+
+async def _save_dm_log_async(items: list) -> None:
+    try:
+        await save_json_async(DM_ATTEMPTS_LOG, items)
+    except Exception as e:
+        logger.debug(f"Failed to save DM log: {e}")
+
+def _recent_dm_block(items: list, uid: str) -> bool:
+    cutoff = _now_ts() - DM_COOLDOWN_HOURS * 3600
+    for it in items[-200:]:
+        if it.get("peer_id") == uid and float(it.get("ts", 0) or 0) > cutoff and it.get("status") == "sent":
+            return True
+    return False
+
+async def safe_send_dm(client: Any, peer: Any, message: str, tzinfo: Any = None) -> bool:
+    logs = await _load_dm_log_async()
+    uid = str(getattr(peer, "user_id", getattr(peer, "id", peer)))
+    if not uid:
+        return False
+    if _recent_dm_block(logs, uid):
+        logs.append({"ts": _now_ts(), "peer_id": uid, "status": "skipped", "reason": "cooldown"})
+        await _save_dm_log_async(logs)
+        return False
+    key = _normalize_key(uid, message)
+    if any(it.get("key") == key and it.get("status") == "sent" for it in logs[-400:]):
+        logs.append({"ts": _now_ts(), "peer_id": uid, "status": "skipped", "reason": "dedup"})
+        await _save_dm_log_async(logs)
+        return False
+    if tzinfo is None:
+        tzinfo = _market_tzinfo()
+    try:
+        local_hour = datetime.datetime.now(tzinfo).hour if tzinfo else datetime.datetime.now().hour
+    except Exception as e:
+        logger.debug(f"Timezone error, falling back to local: {e}")
+        local_hour = datetime.datetime.now().hour
+    if _quiet_hours(local_hour):
+        logs.append({"ts": _now_ts(), "peer_id": uid, "status": "skipped", "reason": "quiet_hours"})
+        await _save_dm_log_async(logs)
+        return False
+    try:
+        await client.send_chat_action(peer, 'typing')
+    except Exception as e:
+        logger.debug(f"Failed to send typing action: {e}")
+    await asyncio.sleep(random.uniform(1.2, 2.6))
+    tries = 0
+    while tries < 2:
         try:
-            secs = int(getattr(e, "seconds", 60))
-        except Exception:
-            secs = 60
-        await asyncio.sleep(secs)
-        return False
-    except PeerFloodError:
-        return False
+            await client.send_message(peer, message)
+            logs.append({"ts": _now_ts(), "peer_id": uid, "status": "sent", "key": key})
+            await _save_dm_log_async(logs)
+            return True
+        except FloodWaitError as e:
+            logs.append({"ts": _now_ts(), "peer_id": uid, "status": "floodwait", "reason": int(getattr(e, "seconds", 60))})
+            await _save_dm_log_async(logs)
+            return False
+        except ChatWriteForbiddenError:
+            logs.append({"ts": _now_ts(), "peer_id": uid, "status": "error", "reason": "forbidden"})
+            await _save_dm_log_async(logs)
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to send DM (try {tries+1}): {e}")
+            tries += 1
+            await asyncio.sleep(1.0 + tries * 1.0)
+    logs.append({"ts": _now_ts(), "peer_id": uid, "status": "error", "reason": "retry_exhausted"})
+    await _save_dm_log_async(logs)
+    return False
 # Constants
 SESSION_NAME = 'aura_apex_supreme_session'
 STATS_FILE = 'supreme_stats.json'
+_stats_cache = None
 PROCESSED_GROUPS = 'supreme_groups.json'
 PROCESSED_LEADS = 'supreme_leads.json'
-BLACKLIST_FILE = 'blacklist.txt'
+# BLACKLIST_FILE is now imported from config
 PROXY_FILE = 'proxy.txt'
-DB_FILE = 'gold_leads.db'
+POTENTIAL_TARGETS = os.path.join("data", "potential_targets.json")
+REJECTED_GROUPS = 'rejected_groups.json'
+JOIN_ATTEMPTS_LOG = 'join_attempts.json'
+PROSPECT_CATALOG_FILE = 'prospect_catalog.json'
+SOURCE_KPIS_FILE = 'source_kpis.json'
+VERIFIED_INVITES_FILE = 'cached_invites.json'
+TARGETS_FILE = os.path.join("data", "targets.json")
+RESOLVE_RATE_TOKENS = 5
+RESOLVE_RATE_INTERVAL = 60
+JOIN_RATE_TOKENS = 10
+JOIN_RATE_INTERVAL = 3600
+BUYER_INTENT_KEYWORDS = []
+MARKET = os.environ.get("MARKET", "").lower()
+ENTITY_CACHE_FILE = 'entity_cache.json'
+CANDIDATE_QUEUE_FILE = 'candidate_queue.json'
+RESOLVE_COOLDOWN_FILE = 'resolve_cooldowns.json'
+class _RateLimiter:
+    def __init__(self, tokens, interval):
+        self.tokens = tokens
+        self.max_tokens = tokens
+        self.interval = interval
+        self.last_refill = time.time()
+    def _refill(self):
+        now = time.time()
+        if now - self.last_refill >= self.interval:
+            self.tokens = self.max_tokens
+            self.last_refill = now
+    async def consume(self):
+        self._refill()
+        if self.tokens > 0:
+            self.tokens -= 1
+            return True
+        return False
+resolve_limiter = _RateLimiter(RESOLVE_RATE_TOKENS, RESOLVE_RATE_INTERVAL)
+join_limiter = _RateLimiter(JOIN_RATE_TOKENS, JOIN_RATE_INTERVAL)
+async def resolve_limiter_consume():
+    return await resolve_limiter.consume()
+async def join_limiter_consume():
+    return await join_limiter.consume()
+async def ensure_connected():
+    try:
+        if client.is_connected():
+            return True
+    except Exception as e:
+        logger.debug(f"Connection check error: {e}")
+    try:
+        await client.connect()
+        return True
+    except Exception as e:
+        logger.error(f"Failed to connect: {e}")
+        return False
+SELLER_SHIELD_TERMS = [
+    "reseller", "resellers", "reseller wanted", "reseller program",
+    "panel", "admin panel", "super admin", "billing panel", "dashboard",
+    "credits", "wholesale", "wholesale price", "supplier", "supplier hub",
+    "restream", "restreamer", "market", "marketplace", "trade hub",
+    "official replacement", "price list",
+    # Locale synonyms
+    "rivenditore", "rivenditori",
+    "distribuidor", "revendedores", "revenda",
+    "mayorista", "proveedor",
+    "grossiste", "revendeur",
+    "revendedor", "fornecedor",
+    "bayi"
+]
+BUYER_PAIN_KEYWORDS = [
+    # Direct Problem Solving (High Intent)
+    "Firestick setup guide",
+    "Android TV box buffering fix",
+    "Nvidia Shield best settings",
+    "TiviMate EPG missing",
+    "IBO Player playlist error",
+    "OTT Smarters login failed",
+    "VPN for streaming lag",
+    "TiviMate buffering Firestick fix",
+    "Shield TV IPTV stutter fix",
+    "IBO Player activation help",
+    "XCIPTV playlist not loading",
+    "Purple Player m3u setup",
+    
+    # Community & Reviews (High Trust)
+    "IPTV provider reviews reddit",
+    "Cord cutting community discussion",
+    "Best streaming apps 2025 forum",
+    "Tivimate users chat",
+    "Android Box support group",
+    "IPTV troubleshooting community",
+    
+    # Advanced Dorks (Google Search Operators)
+    'site:t.me "iptv" "discussion" -"seller"',
+    'site:t.me "tivimate" "support"',
+    'site:reddit.com "telegram group" "iptv"',
+    'inurl:t.me/joinchat "streaming" "help"',
+    'site:t.me "no selling" "iptv"',
+    'site:tgstat.com "iptv" "community"',
+    'site:telemetr.io "iptv" "chat"',
+    'site:reddit.com/r/IPTVdiscussion "t.me"',
+
+    # Short & Punchy (For Telethon Fallback)
+    "Tivimate", "Smarters", "Firestick", "Android TV", "IPTV Help",
+    "Buffering Fix", "Tech Support", "Cord Cutting", "Streaming"
+]
+
+def _build_buyer_intent_keywords():
+    base = list(BUYER_PAIN_KEYWORDS)
+    try:
+        mk = MARKET_KEYWORDS.get(MARKET) or {}
+        buyer = mk.get("buyer") or []
+        problem = mk.get("problem") or []
+        tags = mk.get("tags") or []
+        base.extend(buyer)
+        base.extend(problem)
+        base.extend(tags)
+    except Exception as e:
+        logger.debug(f"Keyword build error: {e}")
+    return list(dict.fromkeys(base))
+BUYER_INTENT_KEYWORDS = _build_buyer_intent_keywords()
+def _buyer_intent_texts(texts):
+    t = " ".join([(x or "").lower() for x in texts if x]).strip()
+    if not t:
+        return False
+    signals = [
+        "help", "support", "setup", "guide", "fix", "buffering", "issues",
+        "community", "chat", "discussion", "question", "problem", "solution",
+        "faq", "rules", "q&a", "how to", "no selling", "not a seller", "discussion only",
+        "official group", "buyers", "users", "members", "tips", "tricks"
+    ]
+    return any(k in t for k in signals)
 
 
 # Specialized Scouters & Keyword Matrix
@@ -287,7 +581,8 @@ def apply_market_keywords():
 # Ghost Mode: User-Agent Rotation
 try:
     ua = UserAgent()
-except Exception:
+except Exception as e:
+    logger.debug(f"UserAgent init failed: {e}")
     ua = None
 UA_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
@@ -305,11 +600,10 @@ def get_ghost_ua():
         return ua.random if request_counter % 5 == 0 else ua.chrome
     return random.choice(UA_LIST)
 
-def init_db():
+async def init_db():
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS leads 
+        async with aiosqlite.connect(DB_FILE) as conn:
+            await conn.execute('''CREATE TABLE IF NOT EXISTS leads 
                      (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                       link TEXT UNIQUE, 
                       group_title TEXT, 
@@ -318,7 +612,7 @@ def init_db():
                       quality_score INTEGER, 
                       status TEXT, 
                       timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS joined_groups
+            await conn.execute('''CREATE TABLE IF NOT EXISTS joined_groups
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
                       group_id INTEGER UNIQUE,
                       title TEXT,
@@ -328,7 +622,7 @@ def init_db():
                       last_scanned_id INTEGER DEFAULT 0,
                       banned INTEGER DEFAULT 0,
                       archived INTEGER DEFAULT 0)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS prospects
+            await conn.execute('''CREATE TABLE IF NOT EXISTS prospects
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
                       user_id INTEGER,
                       username TEXT,
@@ -343,41 +637,50 @@ def init_db():
                       responses_count INTEGER DEFAULT 0,
                       last_contacted_ts DATETIME,
                       UNIQUE(user_id, group_id, message_id))''')
-        c.execute('''CREATE TABLE IF NOT EXISTS keywords
+            await conn.execute('''CREATE TABLE IF NOT EXISTS keywords
                      (term TEXT PRIMARY KEY,
                       weight INTEGER DEFAULT 1,
                       hits INTEGER DEFAULT 0,
                       conversions INTEGER DEFAULT 0,
                       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS activity_log
+            await conn.execute('''CREATE TABLE IF NOT EXISTS activity_log
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
                       ts DATETIME DEFAULT CURRENT_TIMESTAMP,
                       type TEXT,
                       details TEXT)''')
-        try:
-            c.execute("PRAGMA journal_mode=WAL;")
-            c.execute("PRAGMA synchronous=NORMAL;")
-        except Exception:
-            pass
-        conn.commit()
-        conn.close()
+            try:
+                await conn.execute("PRAGMA journal_mode=WAL;")
+                await conn.execute("PRAGMA synchronous=NORMAL;")
+            except Exception as e:
+                logger.debug(f"DB Pragma Error: {e}")
+            await conn.commit()
     except Exception as e:
         logger.error(f"Database Init Error: {e}")
 
-def migrate_db():
+async def migrate_db():
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        c = conn.cursor()
-        try:
-            c.execute("ALTER TABLE prospects ADD COLUMN persona_id TEXT")
-        except Exception:
-            pass
-        try:
-            c.execute("ALTER TABLE joined_groups ADD COLUMN archived INTEGER DEFAULT 0")
-        except Exception:
-            pass
-        conn.commit()
-        conn.close()
+        async with aiosqlite.connect(DB_FILE) as conn:
+            try:
+                await conn.execute("ALTER TABLE prospects ADD COLUMN persona_id TEXT")
+            except Exception as e:
+                logger.debug(f"Migration (persona_id) info: {e}")
+            try:
+                await conn.execute("ALTER TABLE joined_groups ADD COLUMN archived INTEGER DEFAULT 0")
+            except Exception as e:
+                logger.debug(f"Migration (archived) info: {e}")
+            try:
+                await conn.execute("ALTER TABLE prospects ADD COLUMN source TEXT")
+            except Exception as e:
+                logger.debug(f"Migration (prospects.source) info: {e}")
+            try:
+                await conn.execute("ALTER TABLE prospects ADD COLUMN responded INTEGER DEFAULT 0")
+            except Exception as e:
+                logger.debug(f"Migration (prospects.responded) info: {e}")
+            try:
+                await conn.execute("ALTER TABLE joined_groups ADD COLUMN source TEXT")
+            except Exception as e:
+                logger.debug(f"Migration (joined_groups.source) info: {e}")
+            await conn.commit()
     except Exception as e:
         logger.error(f"Database Migration Error: {e}")
 
@@ -387,8 +690,8 @@ def save_lead_to_db(link, title, members, tech_score, quality_score, status):
             "INSERT OR REPLACE INTO leads (link, group_title, members, tech_score, quality_score, status) VALUES (?, ?, ?, ?, ?, ?)",
             (link, title, members, tech_score, quality_score, status)
         ))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Failed to queue lead save: {e}")
 
 def log_activity(event_type, details):
     try:
@@ -396,17 +699,27 @@ def log_activity(event_type, details):
             "INSERT INTO activity_log (type, details) VALUES (?, ?)",
             (event_type, (details or "")[:1000])
         ))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Failed to queue activity log: {e}")
 
-def record_joined_group(group_id, title, username, link):
+def record_joined_group(group_id, title, username, link, source=None):
     try:
         DB_QUEUE.put_nowait((
-            "INSERT OR IGNORE INTO joined_groups (group_id, title, username, link) VALUES (?, ?, ?, ?)",
-            (group_id, title, username, link)
+            "INSERT OR IGNORE INTO joined_groups (group_id, title, username, link, source) VALUES (?, ?, ?, ?, ?)",
+            (group_id, title, username, link, source or "")
         ))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Failed to queue joined group record: {e}")
+
+async def joined_link_exists(link):
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            async with conn.execute("SELECT 1 FROM joined_groups WHERE link = ? LIMIT 1", (link,)) as cursor:
+                row = await cursor.fetchone()
+        return bool(row)
+    except Exception as e:
+        logger.error(f"Error checking if joined link exists: {e}")
+        return False
 
 def mark_group_banned(group_id):
     try:
@@ -414,32 +727,63 @@ def mark_group_banned(group_id):
             "UPDATE joined_groups SET banned = 1 WHERE group_id = ?",
             (group_id,)
         ))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Failed to queue mark group banned: {e}")
 
-def save_prospect(user_id, username, message, message_id, message_ts, group_id, group_title, persona_id, status):
+def save_prospect(user_id, username, message, message_id, message_ts, group_id, group_title, persona_id, status, source=None):
     try:
         DB_QUEUE.put_nowait((
-            "INSERT OR IGNORE INTO prospects (user_id, username, message, message_id, message_ts, group_id, group_title, persona_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (user_id, username, message, message_id, message_ts, group_id, group_title, persona_id, status)
+            "INSERT OR IGNORE INTO prospects (user_id, username, message, message_id, message_ts, group_id, group_title, persona_id, status, source, responded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, username, message, message_id, message_ts, group_id, group_title, persona_id, status, source or "", 0)
         ))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Failed to queue prospect save: {e}")
 
-def choose_persona_id():
+def _load_targets():
+    try:
+        with open(TARGETS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"niche_targets": [], "blacklist_patterns": []}
+def _persona_for_hook(hook):
+    h = (hook or "").lower()
+    if "sports" in h:
+        return "expert"
+    if "tech" in h:
+        return "concise"
+    return random.choice(["expert", "peer", "concise"])
+def _hook_for_group_title(title):
+    data = _load_targets()
+    t = (title or "").lower()
+    for item in data.get("niche_targets", []):
+        kws = [k.lower() for k in item.get("keywords", [])]
+        if any(k in t for k in kws):
+            return item.get("aiden_hook")
+    return None
+def choose_persona_id(group_title=None):
+    hook = _hook_for_group_title(group_title or "")
+    if hook:
+        return _persona_for_hook(hook)
     return random.choice(["expert", "peer", "concise"])
 
-def get_prospect_persona(user_id, group_id):
+async def get_prospect_persona(user_id, group_id):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        c = conn.cursor()
-        c.execute("SELECT persona_id FROM prospects WHERE user_id = ? AND group_id = ? ORDER BY id DESC LIMIT 1", (user_id, group_id))
-        row = c.fetchone()
-        conn.close()
+        async with aiosqlite.connect(DB_FILE) as conn:
+            async with conn.execute("SELECT persona_id FROM prospects WHERE user_id = ? AND group_id = ? ORDER BY id DESC LIMIT 1", (user_id, group_id)) as cursor:
+                row = await cursor.fetchone()
         return row[0] if row and row[0] else None
     except Exception as e:
         logger.error(f"Get persona error: {e}")
         return None
+async def get_group_source(group_id):
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            async with conn.execute("SELECT source FROM joined_groups WHERE group_id = ? LIMIT 1", (group_id,)) as cursor:
+                row = await cursor.fetchone()
+        return (row[0] if row and row[0] else "") if row else ""
+    except Exception as e:
+        logger.error(f"Get group source error: {e}")
+        return ""
 def update_prospect_status(user_id, status, opt_out=False, increment_response=False):
     try:
         fields = []
@@ -450,33 +794,31 @@ def update_prospect_status(user_id, status, opt_out=False, increment_response=Fa
             fields.append("opt_out = 1")
         if increment_response:
             fields.append("responses_count = responses_count + 1")
+            fields.append("responded = 1")
         fields.append("last_contacted_ts = CURRENT_TIMESTAMP")
         q = "UPDATE prospects SET " + ", ".join(fields) + " WHERE user_id = ?"
         params.append(user_id)
         DB_QUEUE.put_nowait((q, tuple(params)))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Failed to queue prospect update: {e}")
 
-def user_opted_out(user_id):
+async def user_opted_out(user_id):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        c = conn.cursor()
-        c.execute("SELECT opt_out FROM prospects WHERE user_id = ? AND opt_out = 1 LIMIT 1", (user_id,))
-        row = c.fetchone()
-        conn.close()
+        async with aiosqlite.connect(DB_FILE) as conn:
+            async with conn.execute("SELECT opt_out FROM prospects WHERE user_id = ? AND opt_out = 1 LIMIT 1", (user_id,)) as cursor:
+                row = await cursor.fetchone()
         return bool(row)
     except Exception as e:
         logger.error(f"Opt-out Check Error: {e}")
         return False
-def get_responses_count(user_id):
+async def get_responses_count(user_id):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        c = conn.cursor()
-        c.execute("SELECT responses_count FROM prospects WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,))
-        row = c.fetchone()
-        conn.close()
+        async with aiosqlite.connect(DB_FILE) as conn:
+            async with conn.execute("SELECT responses_count FROM prospects WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,)) as cursor:
+                row = await cursor.fetchone()
         return int(row[0]) if row and row[0] is not None else 0
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Failed to get responses count: {e}")
         return 0
 
 def record_keyword_hits(text, converted=False):
@@ -491,37 +833,37 @@ def record_keyword_hits(text, converted=False):
             DB_QUEUE.put_nowait(("UPDATE keywords SET hits = hits + 1, updated_at = CURRENT_TIMESTAMP WHERE term = ?", (term,)))
             if converted:
                 DB_QUEUE.put_nowait(("UPDATE keywords SET conversions = conversions + 1, updated_at = CURRENT_TIMESTAMP WHERE term = ?", (term,)))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Failed to record keyword hits: {e}")
 
-def prospect_has_active_conversation(user_id):
+async def prospect_has_active_conversation(user_id):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        c = conn.cursor()
-        c.execute("SELECT 1 FROM prospects WHERE user_id = ? AND status IN ('responded','converted') LIMIT 1", (user_id,))
-        row = c.fetchone()
-        conn.close()
+        async with aiosqlite.connect(DB_FILE) as conn:
+            async with conn.execute("SELECT 1 FROM prospects WHERE user_id = ? AND status IN ('responded','converted') LIMIT 1", (user_id,)) as cursor:
+                row = await cursor.fetchone()
         return bool(row)
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Failed to check active conversation: {e}")
         return False
 SERVICE_USER_IDS = {777000}
 SERVICE_MSG_HINTS = ["login code", "do not give this code", "can be used to log in"]
 
-def should_queue_handshake(user_id):
-    if user_opted_out(user_id):
+async def should_queue_handshake(user_id):
+    if await user_opted_out(user_id):
         return False
-    if prospect_has_active_conversation(user_id):
+    if await prospect_has_active_conversation(user_id):
         return False
     return True
 
-def detect_language_from_bio(text):
+def detect_language_from_bio(text: str) -> Optional[str]:
     if not text:
         return "unknown"
     try:
         if re.search(r'[Ð-Ð¯Ð°-ÑÐÑ‘]', text):
             return "ru"
         return "latin"
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Bio language detection error: {e}")
         return "unknown"
 
 def market_primary_language():
@@ -545,14 +887,16 @@ def detect_language_from_text(text):
         if re.search(r'[Ð-Ð¯Ð°-ÑÐÑ‘]', text):
             return "ru"
         return None
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Text language detection error: {e}")
         return None
 
 def outreach_blocked():
     try:
         v = os.environ.get("STOP_OUTREACH", "").strip().lower()
         return v in ("1", "true", "yes")
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Outreach check error: {e}")
         return False
 
 def choose_target_language(bio_text, snippet):
@@ -627,7 +971,8 @@ def ensure_spintax_variation(text, last_text=None):
             return variant
         extra = random.choice([" quick tip:", " heads-up:", " fyi:", " btw:"])
         return (variant + extra)[:220]
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Spintax error: {e}")
         return text
 
 # Stats Template
@@ -663,6 +1008,7 @@ def get_proxy():
 if not API_ID or not API_HASH:
     logger.critical("API_ID or API_HASH missing in config!")
     sys.exit(1)
+validate_startup_secrets()
 
 # Explicit loop management for stability
 loop = asyncio.new_event_loop()
@@ -686,6 +1032,30 @@ except Exception:
     pass
 LEADS_JSON = 'leads.json'
 KEYWORD_TRIGGERS = ["buffer", "rebrand", "dns help", "provider down", "looking for fix"]
+TITLE_TARGET_KEYWORDS = ["fix", "iptv", "help", "setup"]
+BUYER_INTENT_KEYWORDS = [
+    "Firestick troubleshooting",
+    "TiviMate premium help",
+    "TiviMate support",
+    "IPTV community",
+    "IPTV discussion",
+    "Android TV help",
+    "Nvidia Shield support",
+    "Cord cutting chat",
+    "Streaming problems fix",
+    "Smart TV setup guide",
+    "Smarters player help",
+    "IBO Player support",
+    "Televizo chat",
+    "Formuler box help",
+    "BuzzTV support",
+    "IPTV buffering fix",
+    "VPN for streaming",
+    "Tech support group"
+]
+SELLER_NEGATIVE_KEYWORDS = ["reseller", "panel", "credits", "wholesale", "restream", "source", "supplier", "official", "market", "b2b", "trade", "rivenditore", "distribuidor", "mayorista", "grossiste", "revendedor"]
+SELLER_NEGATIVE_KEYWORDS += ["recruitment", "become reseller", "opportunity", "earn", "profit", "white label panel", "partner program", "affiliate", "bulk", "marketing group", "dealer program", "franchise"]
+BLACKLIST_JOIN = ["spam", "crypto-pump", "adult"]
 DB_QUEUE = asyncio.Queue()
 async def db_writer_loop():
     try:
@@ -693,8 +1063,8 @@ async def db_writer_loop():
         try:
             await conn.execute("PRAGMA journal_mode=WAL;")
             await conn.execute("PRAGMA synchronous=NORMAL;")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"DB Pragma Error (writer): {e}")
         await conn.commit()
         while True:
             try:
@@ -702,14 +1072,16 @@ async def db_writer_loop():
                 try:
                     await conn.execute(sql, params or [])
                     await conn.commit()
-                except Exception:
-                    pass
-            except Exception:
+                except Exception as e:
+                    logger.debug(f"DB Write Error: {e} SQL: {sql}")
+            except Exception as e:
+                logger.debug(f"DB Queue Error: {e}")
                 await asyncio.sleep(1)
-    except Exception:
+    except Exception as e:
+        logger.error(f"DB Writer Critical Error: {e}")
         await asyncio.sleep(5)
 
-def _code_callback():
+async def _code_callback():
     try:
         env_code = (os.environ.get("TELEGRAM_CODE") or "").strip()
         if env_code:
@@ -724,12 +1096,12 @@ def _code_callback():
                     if code:
                         try:
                             os.remove(path)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"Failed to remove code file: {e}")
                         return code
-                except Exception:
-                    pass
-            time.sleep(2)
+                except Exception as e:
+                    logger.debug(f"Failed to read code file: {e}")
+            await asyncio.sleep(2)
     except Exception as e:
         logger.error(f"Code callback error: {e}")
     raise RuntimeError("Telegram login code not provided within timeout")
@@ -737,30 +1109,52 @@ def add_to_blacklist(user_id):
     try:
         with open(BLACKLIST_FILE, 'a', encoding='utf-8') as f:
             f.write(f"{user_id},{datetime.datetime.now().isoformat()}\n")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Failed to add to blacklist: {e}")
 
 # --- Snippet Scoring Engine ---
 
 def calculate_quality_score(text):
-    """Machine Learning-style snippet scoring."""
+    """Machine Learning-style snippet scoring - Updated for B2C Buyer Hubs."""
     score = 0
     text_lower = text.lower()
     
-    # Priority Keywords (+50)
-    if any(k in text_lower for k in ["panel", "reseller", "wholesale", "distribuidor", "rivenditore"]):
+    # 🌟 SUPER TRUST SIGNALS (+100) - Almost guaranteed valid
+    if any(k in text_lower for k in ["no selling", "not a seller", "discussion only", "community only", "official group"]):
+        score += 100
+
+    # Priority Keywords (+50) - BUYER FOCUSED
+    # We want user communities, help groups, and tech discussions
+    buyer_signals = [
+        "help", "support", "setup", "guide", "fix", "buffering", "issues",
+        "community", "chat", "discussion", "question", "problem", "solution",
+        "faq", "rules", "q&a", "how to",
+        "tivimate", "smarters", "ibo", "xciptv", "televizo", "purple",
+        "firestick", "android", "nvidia", "shield", "box", "tv", "chromecast",
+        "cord", "cutting", "stream", "cinema", "film", "series", "vod"
+    ]
+    if any(k in text_lower for k in buyer_signals):
         score += 50
         
     # Tier-1 Location Keywords (+30)
-    if any(k in text_lower for k in ["italy", "spain", "usa", "uk", "canada", "germany", "firestick"]):
+    if any(k in text_lower for k in ["italy", "spain", "usa", "uk", "canada", "germany", "france", "australia", "english"]):
         score += 30
         
+    # Legacy B2B Penalties (We don't want these anymore, but Seller-Shield catches them later. 
+    # Giving them points here would be counter-productive).
+    
     # Junk Reductions (-20 to -100)
-    if any(k in text_lower for k in ["test", "free"]):
+    if any(k in text_lower for k in ["test", "free trial", "sub4sub"]):
         score -= 20
         
     # Auto-Purge: Tier-3 Codes
-    if any(code in text_lower for code in TIER_3_CODES):
+    try:
+        codes_lower = [c.lower() for c in TIER_3_CODES]
+    except Exception as e:
+        logger.debug(f"TIER_3_CODES processing error: {e}")
+        codes_lower = []
+    import re as _re
+    if any(_re.search(rf"\b{_re.escape(code)}\b", text_lower) for code in codes_lower):
         score = -100
         
     return score
@@ -804,8 +1198,942 @@ def intent_score(text):
     if ("price" in t and "panel" in t and "rebrand" in t):
         score += 8
     return score
+def _extract_tme_links(text):
+    try:
+        return re.findall(r'https?://t\\.me/(?:joinchat/\\w+|\\+\\w+|[A-Za-z0-9_]+)', text or "", flags=re.IGNORECASE)
+    except Exception as e:
+        logger.debug(f"Link extraction error: {e}")
+        return []
+def _is_price_list(text):
+    t = (text or "").lower()
+    if not t:
+        return False
+    currency = any(sym in t for sym in ["$", "€", "£"])
+    price_words = any(w in t for w in ["price", "prices", "pricing", "offer", "subscription"])
+    numbers = len(re.findall(r'\\b\\d{1,4}\\b', t))
+    return (currency and numbers >= 3) or (price_words and numbers >= 3)
+async def _output_status(status_text):
+    try:
+        ch = (ADMIN_LEADS_CHANNEL_ID or "").strip()
+        if ch:
+            await client.send_message(int(ch), status_text)
+            return
+    except Exception:
+        try:
+            if ADMIN_LEADS_CHANNEL_ID:
+                await client.send_message(ADMIN_LEADS_CHANNEL_ID, status_text)
+                return
+        except Exception:
+            pass
+    try:
+        await client.send_message('me', status_text)
+    except Exception:
+        logger.info(status_text)
+def _provider_advertising(text):
+    t = (text or "").lower()
+    if not t:
+        return False
+    adv_terms = [
+        "dm for service", "dm for price", "pm for price", "inbox for price", "contact me",
+        "reseller", "panel", "credits", "wholesale", "supplier", "restream", "official replacement",
+        "price list", "price-list", "buy credits", "sell credits", "become reseller", "dashboard",
+        "affiliate", "bulk", "dealer program", "franchise"
+    ]
+    bot_link = ("t.me/" in t and "bot" in t) or "/start" in t
+    return any(k in t for k in adv_terms) or _is_price_list(t) or bot_link
+def _frustrated_user(text):
+    t = (text or "").lower()
+    if not t:
+        return False
+    signals = [
+        "buffer", "lag", "stutter", "freeze", "frame drop", "down", "not working",
+        "quality", "looping", "crash", "error", "no audio", "audio desync",
+        "blocked", "isp", "mtu", "packet loss", "bitrate", "hevc", "h265", "firestick",
+        "tivimate", "smarters", "ibo", "xciptv", "televizo", "mag", "stb", "portal"
+    ]
+    return any(k in t for k in signals)
+USER_BLACKLIST_STRINGS = ['owner', 'admin', 'service', 'reseller', 'panel', 'credits', 'restock', 'iptv_bot', 'support']
+def _user_entity_audit(user):
+    try:
+        uname = None
+        bio = None
+        if user is None:
+            return False
+        try:
+            uname = getattr(user, "username", None) or getattr(getattr(user, "user", None), "username", None)
+        except Exception:
+            uname = None
+        try:
+            bio = getattr(user, "about", None) or getattr(getattr(user, "full_user", None), "about", None)
+        except Exception:
+            bio = None
+        u = (uname or "").lower()
+        b = (bio or "").lower()
+        if any(k in u for k in USER_BLACKLIST_STRINGS):
+            return True
+        if any(k in b for k in USER_BLACKLIST_STRINGS):
+            return True
+        if u.endswith("_iptv") or u.endswith("_bot"):
+            return True
+        return False
+    except Exception:
+        return False
+def marketing_sentiment_score(text):
+    t = (text or "").lower()
+    if not t:
+        return 100
+    adv_high = ["dm me","dm for service","dm for price","pm for price","inbox for price","order now","place order","order","price","prices","pricing"]
+    adv_medium = ["buy","sell","subscribe","subscription","offer","deal","affiliate","bulk","dealer","franchise","supplier","restream","panel","credits","wholesale"]
+    links = ["t.me","http","https"]
+    q_low = ["why","how","help","lag"]
+    tech_keys = ["tivimate","firestick","smarters","xciptv","televizo","mag","stb","portal","dns","buffer","latency"]
+    currency = any(sym in t for sym in ["$", "€", "£"])
+    pos = 0
+    pos += sum(1 for k in adv_high if k in t) * 20
+    pos += sum(1 for k in adv_medium if k in t) * 10
+    pos += sum(1 for k in links if k in t) * 5
+    if currency:
+        pos += 20
+    neg = 0
+    neg += sum(1 for k in q_low if k in t) * 12
+    neg += (15 if "?" in t else 0)
+    score = 50 + pos - neg
+    if "?" in t and any(k in t for k in tech_keys):
+        score -= 50
+    if score < 0:
+        score = 0
+    if score > 100:
+        score = 100
+    return score
+def evaluate_lead_message(text, user=None):
+    if _user_entity_audit(user):
+        return "REJECT"
+    if _provider_advertising(text):
+        return "REJECT"
+    if _frustrated_user(text):
+        return "PROCEED"
+    ms = marketing_sentiment_score(text)
+    if ms <= 20:
+        return "PROCEED"
+    return "REJECT"
+def _ack_line(snippet):
+    t = (snippet or "").lower()
+    if "firestick" in t or "fire stick" in t:
+        return "Yeah, those Firestick frame drops are usually an ISP MTU quirk."
+    if "tivimate" in t:
+        return "On TiviMate, the stutter’s often bitrate spikes and DNS flaps."
+    if "smarters" in t or "xciptv" in t:
+        return "Smarters/XCIPTV lag is often decoder + DNS jitter, not the playlist."
+    if "mag" in t or "stb" in t:
+        return "MAG/STB loops usually mean portal handshake drops or MTU mismatch."
+    if "hevc" in t or "h265" in t:
+        return "HEVC streams can choke if the decoder or bitrate ramp isn’t stable."
+    if "vpn" in t or "blocked" in t:
+        return "Blocks tend to be DNS or ISP shaping, not the player."
+    return "Yeah, the drops sound like DNS jitter and bitrate spikes, not your setup."
+TECH_TO_PAIN = {
+    "tivimate": ["User-Agent spoofing", "AFR (Auto Frame Rate) issues"],
+    "firestick": ["Background Process Limits", "Cache Bloat"],
+    "smarters": ["DNS Hardcoding vs. XC Portal login instability"]
+}
+def _detect_tech_context(snippet):
+    t = (snippet or "").lower()
+    if "tivimate" in t:
+        return "tivimate"
+    if "firestick" in t or "fire stick" in t:
+        return "firestick"
+    if "smarters" in t or "xciptv" in t:
+        return "smarters"
+    return None
+def compose_aiden_dm(snippet, group_title, tech_context=None):
+    a = _ack_line(snippet)
+    ctx = tech_context or _detect_tech_context(snippet) or ""
+    hook = ""
+    try:
+        if ctx in TECH_TO_PAIN:
+            ref = random.choice(TECH_TO_PAIN[ctx])
+            hook = f"{ref} tends to be the hidden culprit."
+    except Exception:
+        hook = ""
+    team_line = ""
+    try:
+        gt = (group_title or "").lower()
+        if "lakers" in gt:
+            team_line = "Caught the Lakers game last night? The 4th‑quarter lag is exactly why I moved to a private node setup."
+        elif "man city" in gt or "mcfc" in gt:
+            team_line = "Saw the Man City match? That late‑game buffering is why I moved to a private node setup."
+        elif "ufc" in gt:
+            team_line = "Watched the UFC card? Those spikes mid‑round are why I moved to a private node setup."
+        elif "f1" in gt or "formula 1" in gt:
+            team_line = "Caught the F1 race? That sector‑split jitter is why I moved to a private node setup."
+    except Exception:
+        team_line = ""
+    b = "I moved to a Private Node tuned for 18–25Mbps Bitrate with HEVC."
+    c = "I rebranded the app and hardcoded DNS to stabilize the resolver path."
+    pivot = "Look, a trial might just lag again if the ISP is throttling the XC handshake. Check this 30‑second clip instead—it shows how I hardcoded the DNS directly into the UI. It bypasses the standard handshake entirely."
+    d = "Want a quick branded demo of the interface? 🤝📺"
+    msg = " ".join([team_line, a, hook, b, c, pivot, d]).strip()
+    words = msg.split()
+    if len(words) > 120:
+        msg = " ".join(words[:120])
+    return re.sub(r'[\\u2600-\\u27BF\\U0001F300-\\U0001FAFF]+', lambda m: m.group(0) if m.group(0) in ['🤝','📺'] else '', msg)
+def _candidate_score(ident, title):
+    try:
+        s = 0
+        tok = (ident or "").split('/')[-1]
+        if 'joinchat' in (ident or "") or (tok or "").startswith('+'):
+            s += 30
+        else:
+            s -= 20
+        if any(k in (title or "").lower() for k in SELLER_SHIELD_TERMS):
+            s -= 100
+        try:
+            kpis = load_json(SOURCE_KPIS_FILE, {})
+        except Exception as e:
+            logger.debug(f"Failed to load KPIs: {e}")
+            kpis = {}
+        rec = kpis.get(str(ident or ""), {})
+        att = int(rec.get("attempts", 0) or 0)
+        suc = int(rec.get("successes", 0) or 0)
+        err = int(rec.get("errors", 0) or 0)
+        if att >= 3:
+            rate = (suc / att) if att > 0 else 0.0
+            s += int(20 * rate)  # stronger boost
+            s -= min(20, err)    # stronger penalty
+        return s
+    except Exception as e:
+        logger.debug(f"Candidate score error: {e}")
+        return 0
+def _title_hit(title):
+    t = (title or "").lower()
+    return any(k in t for k in TITLE_TARGET_KEYWORDS)
+def _title_buyer_hit(title):
+    t = (title or "").lower()
+    return any(k.lower() in t for k in BUYER_PAIN_KEYWORDS)
+def _blacklisted(title):
+    t = (title or "").lower()
+    if any(k in t for k in BLACKLIST_JOIN):
+        return True
+    return any(k in t for k in SELLER_SHIELD_TERMS)
+async def _log_join_event_async(link, title, status, reason):
+    try:
+        items = await load_json_async(JOIN_ATTEMPTS_LOG, [])
+    except Exception as e:
+        logger.debug(f"Failed to load join attempts: {e}")
+        items = []
+    try:
+        items.append({
+            "id": link or "unknown",
+            "title": title or "",
+            "status": status or "",
+            "reason": reason or "",
+            "ts": time.time()
+        })
+        await save_json_async(JOIN_ATTEMPTS_LOG, items)
+    except Exception as e:
+        logger.debug(f"Failed to save join event: {e}")
+    try:
+        kpis = await load_json_async(SOURCE_KPIS_FILE, {})
+    except Exception as e:
+        logger.debug(f"Failed to load KPIs (async): {e}")
+        kpis = {}
+    ident = str(link or "unknown")
+    rec = kpis.get(ident, {"attempts": 0, "successes": 0, "errors": 0})
+    rec["attempts"] = int(rec.get("attempts", 0)) + (1 if status in ("attempt", "joined", "rejected", "error", "rate_limited", "left", "banned") else 0)
+    if status == "joined":
+        rec["successes"] = int(rec.get("successes", 0)) + 1
+    if status in ("error", "banned", "rejected"):
+        rec["errors"] = int(rec.get("errors", 0)) + 1
+    kpis[ident] = rec
+    try:
+        await save_json_async(SOURCE_KPIS_FILE, kpis)
+    except Exception as e:
+        logger.debug(f"Failed to save KPIs: {e}")
+
+def _log_join_event(link, title, status, reason):
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_log_join_event_async(link, title, status, reason))
+    except RuntimeError:
+        logger.debug("No running loop for _log_join_event task")
+    except Exception as e:
+        logger.debug(f"Failed to create join log task: {e}")
+async def resolve_entity_safe(ref):
+    try:
+        await ensure_connected()
+        try:
+            cd = await load_json_async(RESOLVE_COOLDOWN_FILE, {})
+        except Exception as e:
+            logger.debug(f"Failed to load cooldowns: {e}")
+            cd = {}
+        gk = cd.get("__global__")
+        if gk and float(gk) > time.time():
+            return None
+        if not await resolve_limiter_consume():
+            return None
+        key = str(ref)
+        try:
+            cache = await load_json_async(ENTITY_CACHE_FILE, [])
+        except Exception as e:
+            logger.debug(f"Failed to load entity cache: {e}")
+            cache = []
+        if key in cache:
+            return await client.get_input_entity(ref)
+        ent = await client.get_input_entity(ref)
+        try:
+            cache.append(key)
+            await save_json_async(ENTITY_CACHE_FILE, list(dict.fromkeys(cache)))
+        except Exception as e:
+            logger.debug(f"Failed to save entity cache: {e}")
+        return ent
+    except FloodWaitError as e:
+        try:
+            secs = int(getattr(e, "seconds", 60))
+        except Exception as e:
+            logger.debug(f"FloodWait seconds error: {e}")
+            secs = 60
+        logger.warning(f"Resolve FloodWait for {ref}: {secs}s")
+        _log_join_event(str(ref), "", "rate_limited", f"Resolve FloodWait {secs}s")
+        try:
+            cd = await load_json_async(RESOLVE_COOLDOWN_FILE, {})
+        except Exception as e:
+            logger.debug(f"Failed to load cooldowns for update: {e}")
+            cd = {}
+        try:
+            key = str(ref)
+            cd[key] = time.time() + (secs * 2 + 120)
+            if isinstance(ref, str):
+                token = ref.split('/')[-1]
+                uname = token if token and not ('joinchat' in ref or token.startswith('+')) else None
+                if uname:
+                    cd[uname] = time.time() + (secs * 2 + 120)
+            cd["__global__"] = time.time() + (secs * 2 + 120)
+        except Exception as e:
+            logger.debug(f"Failed to update cooldowns: {e}")
+        try:
+            await save_json_async(RESOLVE_COOLDOWN_FILE, cd)
+        except Exception as e:
+            logger.debug(f"Failed to save cooldowns: {e}")
+        return None
+    except Exception as e:
+        logger.warning(f"Resolve entity error for {ref}: {e}")
+        return None
+async def join_safe(request_callable, link, title):
+    try:
+        if not await join_limiter_consume():
+            _log_join_event(link, title, "rate_limited", "Join tokens exhausted")
+            return None
+        return await request_callable
+    except FloodWaitError as e:
+        try:
+            secs = int(getattr(e, "seconds", 60))
+        except Exception as e:
+            logger.debug(f"Join FloodWait seconds error: {e}")
+            secs = 60
+        logger.warning(f"Join FloodWait: {secs}s")
+        _log_join_event(link, title, "rate_limited", f"{secs}s")
+        return None
+async def _save_potential_async(link, title, members, source_gid):
+    try:
+        os.makedirs("data", exist_ok=True)
+    except Exception as e:
+        logger.debug(f"Failed to create data dir: {e}")
+    try:
+        items = await load_json_async(POTENTIAL_TARGETS, [])
+        if any((i.get("link") == link) for i in items):
+            return
+        items.append({
+            "link": link,
+            "title": title,
+            "members": members,
+            "source_group_id": source_gid,
+            "discovered_at": datetime.datetime.now().isoformat()
+        })
+        await save_json_async(POTENTIAL_TARGETS, items)
+    except Exception as e:
+        logger.debug(f"Failed to save potential target: {e}")
+
+def _save_potential(link, title, members, source_gid):
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_save_potential_async(link, title, members, source_gid))
+    except RuntimeError:
+        logger.debug("No running loop for _save_potential task")
+    except Exception as e:
+        logger.debug(f"Failed to create save potential task: {e}")
+def _add_verified_invite(link, title):
+    # This should be async ideally, but if called from sync context we might need a wrapper
+    # For now, let's keep it sync but with logging, or if possible use queue
+    # However, since we are moving to async, let's make it async wrapper like others
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_add_verified_invite_async(link, title))
+    except RuntimeError:
+        logger.debug("No running loop for _add_verified_invite task")
+    except Exception as e:
+        logger.debug(f"Failed to create verified invite task: {e}")
+
+async def _add_verified_invite_async(link, title):
+    try:
+        items = await load_json_async(VERIFIED_INVITES_FILE, [])
+    except Exception as e:
+        logger.debug(f"Failed to load verified invites: {e}")
+        items = []
+    try:
+        key = (link or "").strip()
+        if not key:
+            return
+        if any((it.get("link") == key) for it in items):
+            return
+        items.append({"link": key, "title": title or "", "ts": time.time()})
+        await save_json_async(VERIFIED_INVITES_FILE, items)
+    except Exception as e:
+        logger.debug(f"Failed to save verified invite: {e}")
+async def _scrape_search_pages(keyword: str, max_links: int = 10) -> List[str]:
+    try:
+        headers = {"User-Agent": get_ghost_ua()}
+        links = []
+        ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+        
+        async with aiohttp.ClientSession(headers=headers) as session:
+            # 1. DuckDuckGo HTML Search (Robust)
+            try:
+                ddg_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(keyword + ' site:t.me')}"
+                for _ in range(3):
+                    try:
+                        async with session.get(ddg_url, timeout=15, ssl=ssl_ctx) as r0:
+                            if r0.status == 200:
+                                html = await r0.text()
+                                soup0 = BeautifulSoup(html, "html.parser")
+                                for a in soup0.find_all("a", href=True):
+                                    href = a["href"]
+                                    if "uddg=" in href:
+                                        try:
+                                            from urllib.parse import unquote
+                                            href = unquote(href.split("uddg=")[1].split("&")[0])
+                                        except Exception as e:
+                                            logger.debug(f"DDG unquote error: {e}")
+                                    if "t.me/" in href and not "t.me/s/" in href:
+                                        clean = href.split("?")[0].strip()
+                                        if clean.startswith("https://t.me/"):
+                                            links.append(clean)
+                                break
+                    except Exception:
+                        await asyncio.sleep(1.0)
+            except Exception as e:
+                logger.warning(f"DDG Scrape error: {e}")
+
+            # 2. TGStat (Existing)
+            try:
+                url = f"https://tgstat.com/search?query={urllib.parse.quote(keyword)}&lang=en"
+                for _ in range(2):
+                    try:
+                        async with session.get(url, timeout=15, ssl=ssl_ctx) as r:
+                            if r.status == 200:
+                                html = await r.text()
+                                soup = BeautifulSoup(html, "html.parser")
+                                for a in soup.find_all("a", href=True):
+                                    href = a["href"]
+                                    if href.startswith("https://t.me/") and "TGStat" not in href and "bot" not in href.lower():
+                                        links.append(href)
+                                break
+                    except Exception as e:
+                        logger.debug(f"TGStat scrape error: {e}")
+                        await asyncio.sleep(0.8)
+            except Exception as e:
+                logger.debug(f"TGStat section error: {e}")
+            
+            # 3. Telegroups/Directory (Alternative)
+            try:
+                url2 = f"https://telegramchannels.me/search?q={urllib.parse.quote(keyword)}"
+                for _ in range(2):
+                    try:
+                        async with session.get(url2, timeout=15, ssl=ssl_ctx) as r2:
+                            if r2.status == 200:
+                                html = await r2.text()
+                                soup2 = BeautifulSoup(html, "html.parser")
+                                for a in soup2.find_all("a", href=True):
+                                    href = a["href"]
+                                    if href.startswith("https://t.me/"):
+                                        links.append(href)
+                                break
+                    except Exception:
+                        await asyncio.sleep(0.8)
+            except Exception:
+                pass
+        
+            # 4. Telemetr (Additional Directory)
+            try:
+                url3 = f"https://telemetr.io/search?q={urllib.parse.quote(keyword)}"
+                for _ in range(2):
+                    try:
+                        async with session.get(url3, timeout=15, ssl=ssl_ctx) as r3:
+                            if r3.status == 200:
+                                html = await r3.text()
+                                soup3 = BeautifulSoup(html, "html.parser")
+                                for a in soup3.find_all("a", href=True):
+                                    href = a["href"]
+                                    if href.startswith("https://t.me/"):
+                                        links.append(href)
+                                break
+                    except Exception:
+                        await asyncio.sleep(0.8)
+            except Exception:
+                pass
+        
+        # 5. @tosearch bot (Specialized)
+        try:
+            extra = await fetch_from_tosearch(keyword)
+            for ln in extra or []:
+                links.append(ln)
+        except Exception:
+            pass
+            
+        out = []
+        seen = set()
+        for ln in links:
+            # Basic cleanup
+            ln = ln.strip().rstrip('/')
+            if ln not in seen:
+                # Filter out known junk
+                if "bot" in ln.lower() or "tgstat" in ln.lower() or "subscribe" in ln.lower():
+                    continue
+                out.append(ln)
+                seen.add(ln)
+            if len(out) >= max_links:
+                break
+        if out:
+            return out
+        # Fallback to cached invites when network degraded
+        try:
+            pot = load_json(POTENTIAL_TARGETS, [])
+        except Exception:
+            pot = []
+        cached = []
+        for it in pot:
+            ln = str(it.get("link", "") or "")
+            tok = ln.split('/')[-1]
+            if ln and ('joinchat' in ln or (tok or '').startswith('+')):
+                cached.append(ln.strip().rstrip('/'))
+            if len(cached) >= max_links:
+                break
+        return cached
+    except Exception:
+        return []
+async def fetch_from_tosearch(keyword: str, max_links: int = 10) -> List[str]:
+    try:
+        await ensure_connected()
+        bot = "tosearch"
+        try:
+            await client.send_message(bot, keyword)
+        except Exception:
+            return []
+        await asyncio.sleep(2.0)
+        msgs = []
+        try:
+            msgs = await client.get_messages(bot, limit=20)
+        except Exception:
+            msgs = []
+        out = []
+        seen = set()
+        for m in msgs or []:
+            txt = (getattr(m, "message", "") or getattr(m, "text", "") or "")
+            for part in txt.split():
+                h = part.strip().rstrip(",.;)()]")
+                if h.startswith("https://t.me/"):
+                    tok = h.split("/")[-1]
+                    if 'joinchat' in h or (tok or '').startswith('+'):
+                        if h not in seen:
+                            out.append(h)
+                            seen.add(h)
+                if len(out) >= max_links:
+                    break
+            if len(out) >= max_links:
+                break
+        return out
+    except Exception:
+        return []
+def _targets_keywords():
+    data = _load_targets()
+    out = []
+    for item in data.get("niche_targets", []):
+        out.extend(item.get("keywords", []))
+    return out
+async def discover_fan_groups_via_telethon(limit_per_kw: int = 10) -> List[Dict[str, Any]]:
+    try:
+        await ensure_connected()
+        kws = _targets_keywords()
+        out = []
+        for kw in kws:
+            try:
+                res = await client(functions.contacts.SearchRequest(q=kw, limit=limit_per_kw))
+            except Exception:
+                continue
+            chats = getattr(res, "chats", []) or []
+            for ch in chats:
+                try:
+                    uname = getattr(ch, "username", None)
+                    if not uname:
+                        continue
+                    ent = await client.get_input_entity(f"https://t.me/{uname}")
+                    full = await client(GetFullChannelRequest(ent))
+                    fc = getattr(full, "full_chat", None)
+                    title = getattr(getattr(full, "chats", [{}])[0], "title", "") or ""
+                    members = getattr(fc, "participants_count", 0) or 0
+                    pid = getattr(fc, "pinned_msg_id", None)
+                    uncertain = False
+                    if pid:
+                        try:
+                            pm = await client.get_messages(ent, ids=pid)
+                            ptxt = (getattr(pm, "message", "") or getattr(pm, "text", "") or "").lower()
+                            if _is_price_list(ptxt) or ("t.me/" in ptxt and "bot" in ptxt):
+                                continue
+                            if not ptxt.strip():
+                                uncertain = True
+                        except Exception:
+                            uncertain = True
+                    else:
+                        uncertain = True
+                    if members and members > 100 and _title_hit(title) and not _blacklisted(title):
+                        out.append({"link": f"https://t.me/{uname}", "title": title, "members": members, "source": "telethon_search", "uncertain": uncertain})
+                except Exception:
+                    continue
+        return out
+    except Exception:
+        return []
+async def discover_links_from_reddit(max_links: int = 20) -> List[str]:
+    try:
+        if praw is None:
+            return []
+        cid = (os.environ.get("REDDIT_CLIENT_ID") or "").strip()
+        cs = (os.environ.get("REDDIT_CLIENT_SECRET") or "").strip()
+        ua = (os.environ.get("REDDIT_USER_AGENT") or "").strip()
+        if not cid or not cs or not ua:
+            return []
+        r = praw.Reddit(client_id=cid, client_secret=cs, user_agent=ua, check_for_async=False)
+        subs = set()
+        for kw in _targets_keywords():
+            k = kw.lower()
+            if "lakers" in k:
+                subs.add("lakers")
+            if "man city" in k or "mcfc" in k:
+                subs.add("mcfc")
+            if "ufc" in k:
+                subs.add("ufc")
+            if "f1" in k:
+                subs.add("formula1")
+            if "firestick" in k:
+                subs.add("fireTV")
+            if "nvidia shield" in k or "shield" in k:
+                subs.add("shieldandroidtv")
+            if "tivimate" in k:
+                subs.add("TiviMate")
+        links = []
+        import re as _re2
+        backoff = 5
+        for s in list(subs):
+            try:
+                sr = r.subreddit(s)
+                for post in sr.new(limit=50):
+                    txt = ((post.title or "") + " " + (post.selftext or "")).lower()
+                    if "telegram" in txt or "t.me" in txt:
+                        for m in _re2.finditer(r'https?://t\\.me/(?:joinchat/\\w+|\\+\\w+|[A-Za-z0-9_]+)', txt, flags=re.IGNORECASE):
+                            links.append(m.group(0))
+                            if len(links) >= max_links:
+                                break
+                    if len(links) >= max_links:
+                        break
+            except Exception as e:
+                try:
+                    await asyncio.sleep(backoff)
+                except Exception:
+                    pass
+                backoff = min(backoff * 2, 300)
+                continue
+        seen = set()
+        out = []
+        for ln in links:
+            key = ln.strip().rstrip("/")
+            if key not in seen:
+                seen.add(key)
+                out.append(key)
+        return out
+    except Exception:
+        return []
+async def directory_scraper_loop():
+    while True:
+        try:
+            await ensure_connected()
+            if not should_scrape_now():
+                await asyncio.sleep(3600)
+                continue
+            keys = []
+            try:
+                for arr in SCOUTER_MISSIONS.values():
+                    keys.extend(arr)
+            except Exception:
+                keys = TITLE_TARGET_KEYWORDS
+            random.shuffle(keys)
+            sample = keys[:4]
+            for kw in sample:
+                found = await _scrape_search_pages(kw, max_links=10)
+                for ln in found:
+                    try:
+                        token = ln.split('/')[-1]
+                        title = ""
+                        members = 0
+                        about = ""
+                        if 'joinchat' in ln or token.startswith('+'):
+                            try:
+                                invite = await client(CheckChatInviteRequest(token.lstrip('+')))
+                                chat_obj = getattr(invite, 'chat', invite)
+                                title = getattr(chat_obj, 'title', '') or ''
+                                members = getattr(chat_obj, 'participants_count', 0) or 0
+                                about = getattr(chat_obj, 'about', '') or ''
+                            except Exception:
+                                continue
+                        else:
+                            try:
+                                ent = await client.get_input_entity(ln)
+                                if isinstance(ent, (types.InputPeerUser, types.InputPeerSelf)):
+                                    continue
+                                full = await client(GetFullChannelRequest(ent))
+                                full_chat = getattr(full, 'full_chat', None)
+                                title = getattr(getattr(full, 'chats', [{}])[0], 'title', '') or ''
+                                members = getattr(full_chat, 'participants_count', 0) or 0
+                                about = getattr(full_chat, 'about', '') or ''
+                            except Exception:
+                                continue
+                        buyer_ok = _buyer_intent_texts([title, about])
+                        if not buyer_ok:
+                            continue
+                        if members and members > 100 and _title_hit(title) and not _blacklisted(title):
+                            _save_potential(ln, title, members, "directory")
+                            log_activity("spider_discovered", f"{title}:{members}")
+                    except Exception:
+                        pass
+            await asyncio.sleep(86400)
+        except Exception as e:
+            logger.error(f"Directory scraper error: {e}")
+            await asyncio.sleep(3600)
+async def spider_discover_once(max_keywords=3, max_links_per_kw=8, telethon_peek=True):
+    try:
+        keys = list(BUYER_PAIN_KEYWORDS)
+        random.shuffle(keys)
+        sample = keys[:max_keywords]
+        discovered = 0
+        for kw in sample:
+            found = await _scrape_search_pages(kw, max_links=max_links_per_kw)
+            for ln in found:
+                try:
+                    token = ln.split('/')[-1]
+                    title = ""
+                    members = 0
+                    if telethon_peek:
+                        if 'joinchat' in ln or token.startswith('+'):
+                            try:
+                                invite = await client(CheckChatInviteRequest(token.lstrip('+')))
+                                chat_obj = getattr(invite, 'chat', invite)
+                                title = getattr(chat_obj, 'title', '') or ''
+                                members = getattr(chat_obj, 'participants_count', 0) or 0
+                            except Exception:
+                                continue
+                        else:
+                            try:
+                                ent = await client.get_input_entity(ln)
+                                full = await client(GetFullChannelRequest(ent))
+                                full_chat = getattr(full, 'full_chat', None)
+                                title = getattr(getattr(full, 'chats', [{}])[0], 'title', '') or ''
+                                members = getattr(full_chat, 'participants_count', 0) or 0
+                            except Exception:
+                                continue
+                    else:
+                        title = "iptv help setup fix"
+                        members = 101
+                    if members and members > 100 and not _blacklisted(title):
+                        _save_potential(ln, title, members, "directory")
+                        log_activity("spider_discovered", f"{title}:{members}")
+                        discovered += 1
+                except Exception:
+                    pass
+        try:
+            extra_links = await discover_fan_groups_via_telethon(limit_per_kw=max_links_per_kw)
+        except Exception:
+            extra_links = []
+        for rec in extra_links:
+            try:
+                ln = (rec.get("link") or "").strip()
+                title = rec.get("title") or ""
+                members = int(rec.get("members") or 0)
+                source = rec.get("source") or "telethon_search"
+                uncertain = bool(rec.get("uncertain"))
+                if members and members > 100 and not _blacklisted(title):
+                    _save_potential(ln, title, members, source)
+                    log_activity("spider_discovered", f"{title}:{members}")
+                    discovered += 1
+                    if uncertain:
+                        try:
+                            items = load_json(POTENTIAL_TARGETS, [])
+                        except Exception:
+                            items = []
+                        for it in items:
+                            if it.get("link") == ln:
+                                it["uncertain"] = True
+                                break
+                        save_json(POTENTIAL_TARGETS, items)
+            except Exception:
+                pass
+        try:
+            reddit_links = await discover_links_from_reddit(max_links=max_links_per_kw * 2)
+        except Exception:
+            reddit_links = []
+        for ln in reddit_links:
+            try:
+                token = ln.split('/')[-1]
+                title = ""
+                members = 0
+                if 'joinchat' in ln or token.startswith('+'):
+                    invite = await client(CheckChatInviteRequest(token.lstrip('+')))
+                    chat_obj = getattr(invite, 'chat', invite)
+                    title = getattr(chat_obj, 'title', '') or ''
+                    members = getattr(chat_obj, 'participants_count', 0) or 0
+                else:
+                    ent = await client.get_input_entity(ln)
+                    full = await client(GetFullChannelRequest(ent))
+                    full_chat = getattr(full, 'full_chat', None)
+                    title = getattr(getattr(full, 'chats', [{}])[0], 'title', '') or ''
+                    members = getattr(full_chat, 'participants_count', 0) or 0
+                if members and members > 100 and not _blacklisted(title):
+                    _save_potential(ln, title, members, "reddit_bridge")
+                    log_activity("spider_discovered", f"{title}:{members}")
+                    discovered += 1
+            except Exception:
+                pass
+        return discovered
+    except Exception as e:
+        logger.error(f"spider_discover_once error: {e}")
+        return 0
+
+async def potential_targets_dedupe_loop():
+    while True:
+        try:
+            items = load_json(POTENTIAL_TARGETS, [])
+            seen = set()
+            deduped = []
+            for it in items:
+                ln = (it.get("link") or "").strip()
+                if not ln or ln in seen:
+                    continue
+                seen.add(ln)
+                deduped.append(it)
+            if len(deduped) != len(items):
+                save_json(POTENTIAL_TARGETS, deduped)
+                log_activity("targets_deduped", f"{len(items)}->{len(deduped)}")
+        except Exception:
+            pass
+        await asyncio.sleep(86400)
+
+async def performance_monitor(duration_sec=2400, sample_interval=10):
+    start = time.time()
+    proc = None
+    try:
+        if psutil:
+            proc = psutil.Process(os.getpid())
+    except Exception:
+        proc = None
+    samples_path = os.path.join(os.getcwd(), "perf_samples.jsonl")
+    report_path = os.path.join(os.getcwd(), "perf_report.md")
+    errors_count = 0
+    max_cpu = 0.0
+    max_rss = 0
+    connectivity_ok = 0
+    connectivity_fail = 0
+    while time.time() - start < duration_sec:
+        try:
+            s = {"ts": time.time()}
+            if psutil:
+                try:
+                    s["cpu_percent"] = psutil.cpu_percent(interval=0.2)
+                    max_cpu = max(max_cpu, float(s["cpu_percent"]))
+                except Exception:
+                    s["cpu_percent"] = None
+                try:
+                    mi = proc.memory_info() if proc else None
+                    s["mem_rss"] = int(getattr(mi, "rss", 0)) if mi else None
+                    max_rss = max(max_rss, int(s["mem_rss"] or 0))
+                except Exception:
+                    s["mem_rss"] = None
+                try:
+                    s["num_threads"] = int(proc.num_threads()) if proc else None
+                except Exception:
+                    s["num_threads"] = None
+            try:
+                await ensure_connected()
+                ok = False
+                try:
+                    _ = await client.get_dialogs(limit=1)
+                    ok = True
+                except Exception:
+                    ok = False
+                s["tg_connectivity"] = "ok" if ok else "fail"
+                if ok:
+                    connectivity_ok += 1
+                else:
+                    connectivity_fail += 1
+            except Exception:
+                s["tg_connectivity"] = "fail"
+                connectivity_fail += 1
+            try:
+                # Scan recent log file tail for errors
+                log_file = "bot.log"
+                if os.path.exists(log_file):
+                    with open(log_file, "rb") as f:
+                        try:
+                            f.seek(-4096, os.SEEK_END)
+                        except Exception:
+                            pass
+                        tail = f.read().decode("utf-8", errors="ignore")
+                        errs = sum(1 for ln in tail.splitlines() if ("ERROR" in ln or "CRITICAL" in ln))
+                        s["log_tail_errors"] = errs
+                        errors_count += errs
+                else:
+                    s["log_tail_errors"] = 0
+            except Exception:
+                s["log_tail_errors"] = None
+            try:
+                with open(samples_path, "a", encoding="utf-8") as wf:
+                    import json as _json
+                    wf.write(_json.dumps(s) + "\n")
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Perf sample error: {e}")
+        await asyncio.sleep(sample_interval)
+    try:
+        # Summarize
+        mem_mb = round(max_rss / (1024 * 1024), 2) if max_rss else 0.0
+        report = []
+        report.append("## 40-Minute Performance Report")
+        report.append(f"- Peak CPU: {max_cpu:.2f}%")
+        report.append(f"- Peak RSS Memory: {mem_mb} MB")
+        report.append(f"- Telegram Connectivity OK/FAIL: {connectivity_ok}/{connectivity_fail}")
+        report.append(f"- Logged Errors (tail accumulative): {errors_count}")
+        report.append(f"- Samples file: {samples_path}")
+        with open(report_path, "w", encoding="utf-8") as rf:
+            rf.write("\n".join(report))
+        try:
+            aid = ADMIN_LEADS_CHANNEL_ID
+            msg = "Performance test complete. Report written to perf_report.md"
+            if aid:
+                await client.send_message(int(aid) if str(aid).isdigit() else aid, msg)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"Perf report write error: {e}")
 
 def should_scrape_now():
+    if os.environ.get("AURA_MODE", "").lower() == "testing":
+        return True
     lt = time.localtime()
     h = lt.tm_hour
     w = lt.tm_wday
@@ -817,9 +2145,15 @@ def should_scrape_now():
 
 # --- Logic Engine ---
 
-async def gatekeeper(chat_ref):
-    stats = load_json(STATS_FILE, apex_supreme_stats)
+async def gatekeeper(chat_ref: Any) -> Tuple[bool, str]:
+    global _stats_cache
+    if _stats_cache is None:
+        _stats_cache = await load_json_async(STATS_FILE, apex_supreme_stats)
+    stats = _stats_cache
+    
     try:
+        await ensure_connected()
+        override = (os.environ.get("TEST_JOIN_OVERRIDE") or "").strip() == "1"
         current_ua = get_ghost_ua()
         logger.info(f"Ghost Mode: Requesting via UA: {current_ua[:30]}...")
 
@@ -837,23 +2171,25 @@ async def gatekeeper(chat_ref):
                     title = getattr(chat_obj, 'title', '').lower()
                     about = getattr(chat_obj, 'about', '').lower() if hasattr(chat_obj, 'about') else ''
                     members = getattr(chat_obj, 'participants_count', 0)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"CheckChatInviteRequest failed: {e}")
                 link = chat_ref
             else:
                 link = chat_ref
                 try:
-                    entity = await client.get_input_entity(chat_ref)
-                except Exception:
+                    entity = await resolve_entity_safe(chat_ref)
+                except Exception as e:
                     try:
-                        entity = await client.get_input_entity(token)
-                    except Exception:
+                        entity = await resolve_entity_safe(token)
+                    except Exception as e2:
+                        logger.debug(f"resolve_entity_safe failed for token: {e2}")
                         entity = None
         else:
             try:
-                entity = await client.get_input_entity(chat_ref)
+                entity = await resolve_entity_safe(chat_ref)
                 link = f"channel_id:{getattr(chat_ref, 'id', 'unknown')}"
-            except Exception:
+            except Exception as e:
+                logger.debug(f"resolve_entity_safe failed for ref: {e}")
                 entity = None
                 link = None
 
@@ -864,33 +2200,134 @@ async def gatekeeper(chat_ref):
                 about = (getattr(full_chat, 'about', '') or '').lower()
                 members = getattr(full_chat, 'participants_count', 0)
                 title = getattr(getattr(full, 'chats', [{}])[0], 'title', '').lower()
-            except Exception:
-                pass
+                try:
+                    pid = getattr(full_chat, "pinned_msg_id", None)
+                    if pid:
+                        pm = await client.get_messages(entity, ids=pid)
+                        ptxt = (getattr(pm, "message", "") or getattr(pm, "text", "") or "").lower()
+                        if _is_price_list(ptxt) or ("t.me/" in ptxt and "bot" in ptxt):
+                            try:
+                                items = await load_json_async(REJECTED_GROUPS, [])
+                                items.append({"id": link or "unknown", "title": title or "", "reason": "pinned_ad", "ts": time.time()})
+                                await save_json_async(REJECTED_GROUPS, items)
+                            except Exception:
+                                pass
+                            _log_join_event(link, title, "rejected", "Pinned Ad/Bot Link")
+                            return False, "Pinned Ad/Bot Link"
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.debug(f"GetFullChannelRequest failed: {e}")
 
         pre_text = (title + " " + about).strip()
         if pre_text:
             q_score = calculate_quality_score(pre_text)
-            if q_score <= 0:
-                 return False, f"Low Quality Score ({q_score})"
-            if not execute_mission_filter(pre_text):
-                stats["spam_shielded"] += 1
-                save_json(STATS_FILE, stats)
-                return False, "Junk/Tier-3 Filtered"
-        if members and members < 30:
-            return False, f"Small Group ({members})"
+            if not override:
+                if q_score <= 0:
+                     _log_join_event(link, title, "rejected", f"Low Quality Score ({q_score})")
+                     return False, f"Low Quality Score ({q_score})"
+                if _is_price_list(pre_text):
+                    try:
+                        items = await load_json_async(REJECTED_GROUPS, [])
+                        items.append({"id": link or "unknown", "title": title or "", "reason": "price_list", "ts": time.time()})
+                        await save_json_async(REJECTED_GROUPS, items)
+                    except Exception as e:
+                        logger.warning(f"Failed to save price_list rejection: {e}")
+                    _log_join_event(link, title, "rejected", "Price List/Ad Pattern")
+                    return False, "Price List/Ad Pattern"
+                
+                # RELAXATION: If score is high (High Trust/Buyer Signal), bypass strict Tier-3 filter
+                mission_passed = execute_mission_filter(pre_text)
+                if not mission_passed:
+                    if q_score >= 40:
+                        # High trust score overrides Tier-3/Junk filter
+                        pass
+                    else:
+                        stats["spam_shielded"] += 1
+                        await save_json_async(STATS_FILE, stats)
+                        try:
+                            items = await load_json_async(REJECTED_GROUPS, [])
+                            items.append({"id": link or "unknown", "title": title or "", "reason": "junk_tier3", "ts": time.time()})
+                            await save_json_async(REJECTED_GROUPS, items)
+                        except Exception as e:
+                             logger.warning(f"Failed to save junk_tier3 rejection: {e}")
+                        _log_join_event(link, title, "rejected", "Junk/Tier-3 Filtered")
+                        return False, "Junk/Tier-3 Filtered"
+                trade_terms = ["reseller", "wholesale", "panel", "credits", "restream", "source", "supplier", "official", "market", "b2b", "trade", "opportunity"]
+                if any(k in pre_text for k in trade_terms):
+                    try:
+                        nm = (title or "Unknown").strip() or "Unknown"
+                        await client.send_message('me', f"🚫 [Gatekeeper] Skipped Seller Hub: {nm}")
+                    except Exception:
+                        pass
+                    try:
+                        items = await load_json_async(REJECTED_GROUPS, [])
+                        items.append({"id": link or "unknown", "title": title or "", "reason": "trade_hub", "ts": time.time()})
+                        await save_json_async(REJECTED_GROUPS, items)
+                    except Exception as e:
+                        logger.warning(f"Failed to save trade_hub rejection: {e}")
+                    _log_join_event(link, title, "rejected", "Trade Hub")
+                    return False, "Trade Hub"
+                if ("official" in pre_text) and any(sym in pre_text for sym in ["$", "€", "£", "price"]):
+                    try:
+                        nm = (title or "Unknown").strip() or "Unknown"
+                        await client.send_message('me', f"🚫 [Gatekeeper] Skipped Seller Hub: {nm}")
+                    except Exception:
+                        pass
+                    try:
+                        items = await load_json_async(REJECTED_GROUPS, [])
+                        items.append({"id": link or "unknown", "title": title or "", "reason": "official_price_list", "ts": time.time()})
+                        await save_json_async(REJECTED_GROUPS, items)
+                    except Exception as e:
+                         logger.warning(f"Failed to save official_price_list rejection: {e}")
+                    _log_join_event(link, title, "rejected", "Official Price List")
+                    return False, "Official Price List"
+        if not override:
+            if members and members < 150:
+                try:
+                    items = await load_json_async(REJECTED_GROUPS, [])
+                    items.append({"id": link or "unknown", "title": title or "", "reason": "small_group", "ts": time.time()})
+                    await save_json_async(REJECTED_GROUPS, items)
+                except Exception as e:
+                    logger.warning(f"Failed to save small_group rejection: {e}")
+                _log_join_event(link, title, "rejected", f"Small Group ({members})")
+                return False, f"Small Group ({members})"
+            try:
+                token = None
+                if isinstance(chat_ref, str):
+                    token = chat_ref.split('/')[-1]
+                is_invite = isinstance(chat_ref, str) and ('joinchat' in chat_ref or (token or '').startswith('+'))
+                if entity and not is_invite:
+                    msgs = await client.get_messages(entity, limit=5)
+                    link_hits = sum(1 for m in msgs if m and _extract_tme_links(getattr(m, "text", "") or ""))
+                    if link_hits > 2:
+                        try:
+                            items = await load_json_async(REJECTED_GROUPS, [])
+                            items.append({"id": link or "unknown", "title": title or "", "reason": "prejoin_spam_links", "ts": time.time()})
+                            await save_json_async(REJECTED_GROUPS, items)
+                        except Exception as e:
+                            logger.warning(f"Failed to save prejoin_spam_links rejection: {e}")
+                        _log_join_event(link, title, "rejected", "Spam/Seller Hub")
+                        return False, "Spam/Seller Hub"
+            except Exception as e:
+                logger.debug(f"Prejoin spam check failed: {e}")
 
         log_activity("group_join_attempt", link or "unknown")
+        _log_join_event(link, title, "attempt", "")
         try:
             if isinstance(chat_ref, str):
                 token = chat_ref.split('/')[-1]
                 if 'joinchat' in chat_ref or token.startswith('+'):
-                    join_result = await client(ImportChatInviteRequest(token.lstrip('+')))
+                    join_result = await join_safe(client(ImportChatInviteRequest(token.lstrip('+'))), link or chat_ref, title or "")
                 elif entity:
-                    join_result = await client(JoinChannelRequest(entity))
+                    join_result = await join_safe(client(JoinChannelRequest(entity)), link or chat_ref, title or "")
                 else:
+                    _log_join_event(link, title, "error", "Join Error: Unable to resolve entity")
                     return False, "Join Error: Unable to resolve entity"
             else:
-                join_result = await client(JoinChannelRequest(entity))
+                join_result = await join_safe(client(JoinChannelRequest(entity)), link or "unknown", title or "")
+            if not join_result:
+                return False, "Join attempt skipped"
             if hasattr(join_result, "chats") and join_result.chats:
                 chat_obj2 = join_result.chats[0]
                 chat_id = chat_obj2.id
@@ -900,22 +2337,64 @@ async def gatekeeper(chat_ref):
                 chat_id = join_result.updates[0].message.peer_id.channel_id
                 chat_title = "Unknown"
                 chat_username = None
-            record_joined_group(chat_id, chat_title, chat_username, link or (f"https://t.me/{chat_username}" if chat_username else f"channel_id:{chat_id}"))
+            src = ""
+            try:
+                items = load_json(POTENTIAL_TARGETS, [])
+            except Exception:
+                items = []
+            try:
+                for it in items:
+                    if (it.get("link") or "").strip() == (link or "").strip():
+                        src = str(it.get("source_group_id") or it.get("source") or "")
+                        break
+            except Exception:
+                src = ""
+            record_joined_group(chat_id, chat_title, chat_username, link or (f"https://t.me/{chat_username}" if chat_username else f"channel_id:{chat_id}"), src or "")
             log_activity("group_joined", f"{chat_id}:{chat_title}")
+            try:
+                logger.info(f"✅ [Gatekeeper] Joined Buyer Hub: {chat_title}")
+            except Exception:
+                pass
+            try:
+                if ADMIN_LEADS_CHANNEL_ID:
+                    aid = int(ADMIN_LEADS_CHANNEL_ID) if str(ADMIN_LEADS_CHANNEL_ID).isdigit() else ADMIN_LEADS_CHANNEL_ID
+                    await client.send_message(aid, f"🛰️ New Buyer-Hub Located: {chat_title}. Monitoring for lead signals now.")
+            except Exception:
+                pass
+            _log_join_event(link, title, "joined", "")
+            try:
+                _add_verified_invite(link or (f"https://t.me/{chat_username}" if chat_username else f"channel_id:{chat_id}"), chat_title or "")
+            except Exception:
+                pass
         except FloodWaitError as fe:
             wait_s = int(getattr(fe, "seconds", 60)) + 60
             logger.warning(f"Join FloodWait: sleeping {wait_s}s")
             await asyncio.sleep(wait_s)
+            try:
+                cd = await load_json_async(RESOLVE_COOLDOWN_FILE, {})
+            except Exception:
+                cd = {}
+            try:
+                cd["__global__"] = time.time() + (wait_s * 2 + 120)
+                await save_json_async(RESOLVE_COOLDOWN_FILE, cd)
+            except Exception as e:
+                logger.warning(f"Failed to save cooldown: {e}")
             log_activity("group_join_rate_limited", f"{(link or 'unknown')}:{wait_s}")
+            _log_join_event(link, title, "rate_limited", f"{wait_s}s")
             return False, "Join rate limited"
         except UserBannedInChannelError as e:
             log_activity("group_join_banned", f"{(link or 'unknown')}:{str(e)[:120]}")
+            _log_join_event(link, title, "banned", str(e)[:120])
             return False, "Join banned"
         except Exception as e: 
             log_activity("group_join_error", f"{(link or 'unknown')}:{str(e)[:120]}")
+            _log_join_event(link, title, "error", str(e)[:120])
             return False, f"Join Error: {e}"
 
-        await asyncio.sleep(random.randint(180, 420))
+        if not override and os.environ.get("AURA_MODE") != "testing":
+            await asyncio.sleep(random.randint(600, 1200))
+        elif not override:
+             await asyncio.sleep(5) # Minimal sleep for testing mode
         try:
             dialogs = await client.get_dialogs(limit=10)
             public_dialogs = [d for d in dialogs if d.is_channel or d.is_group]
@@ -931,9 +2410,44 @@ async def gatekeeper(chat_ref):
         tech_hits = sum(1 for m in messages if m.text and any(k in m.text.lower() for k in ['dns', 'portal', 'xtream', 'm3u', 'stalker', 'mac']))
         total_q_score = calculate_quality_score(combined_text) + (tech_hits * 5)
 
-        if total_q_score < 30:
-            await client(LeaveChannelRequest(chat_id))
-            return False, f"Low Depth Score ({total_q_score})"
+        if not override:
+            now_ts = datetime.datetime.now(datetime.timezone.utc)
+            recent = [m for m in messages if getattr(m, "date", None)]
+            # Relaxed Activity Check: Just need 1 message in last 7 days (168 hours)
+            recent = [m for m in recent if (now_ts - (m.date if m.date.tzinfo else m.date.replace(tzinfo=datetime.timezone.utc))) <= datetime.timedelta(hours=168)]
+            if len(recent) < 1:
+                await client(LeaveChannelRequest(chat_id))
+                try:
+                    items = await load_json_async(REJECTED_GROUPS, [])
+                    items.append({"id": link or "unknown", "title": title or "", "reason": "low_activity", "ts": time.time()})
+                    await save_json_async(REJECTED_GROUPS, items)
+                except Exception as e:
+                    logger.warning(f"Failed to save low_activity rejection: {e}")
+                _log_join_event(link, title, "left", "Low Activity")
+                return False, "Low Activity"
+            last10 = await client.get_messages(chat_id, limit=10)
+            link_count = sum(1 for m in last10 if m.text and _extract_tme_links(m.text))
+            if link_count > 3:
+                await client(LeaveChannelRequest(chat_id))
+                try:
+                    items = await load_json_async(REJECTED_GROUPS, [])
+                    items.append({"id": link or "unknown", "title": title or "", "reason": "spam_seller", "ts": time.time()})
+                    await save_json_async(REJECTED_GROUPS, items)
+                except Exception as e:
+                    logger.warning(f"Failed to save spam_seller rejection: {e}")
+                _log_join_event(link, title, "left", "Spam/Seller")
+                return False, "Spam/Seller"
+        if total_q_score < 10:
+            if not override:
+                await client(LeaveChannelRequest(chat_id))
+                try:
+                    items = await load_json_async(REJECTED_GROUPS, [])
+                    items.append({"id": link or "unknown", "title": title or "", "reason": "low_depth_score", "ts": time.time()})
+                    await save_json_async(REJECTED_GROUPS, items)
+                except Exception as e:
+                    logger.warning(f"Failed to save low_depth_score rejection: {e}")
+                _log_join_event(link, title, "left", f"Low Depth Score ({total_q_score})")
+                return False, f"Low Depth Score ({total_q_score})"
 
         urgent_terms = ["down", "black screen", "expired", "server down", "buffering issue", "need new provider"]
         urgent = any(k in combined_text for k in urgent_terms)
@@ -950,13 +2464,28 @@ async def gatekeeper(chat_ref):
         return True, f"Gold Lead (Score: {total_q_score})"
     except Exception as e:
         logger.error(f"Gatekeeper error: {e}")
+        _log_join_event(None, None, "error", "Analysis Error")
         return False, "Analysis Error"
 
+async def purge_existing_sellers():
+    try:
+        dialogs = await client.get_dialogs(limit=200)
+        for d in dialogs:
+            try:
+                ttl = (getattr(d, "title", "") or "").lower()
+                if any(k in ttl for k in SELLER_SHIELD_TERMS):
+                    await client(LeaveChannelRequest(d.entity))
+                    logger.info(f"🚫 [Gatekeeper] Skipped Seller Hub: {getattr(d, 'title', '')}")
+            except Exception as e:
+                logger.debug(f"Error purging seller {getattr(d, 'id', 'unknown')}: {e}")
+    except Exception as e:
+        logger.error(f"Error in purge_existing_sellers: {e}")
 
 async def user_discovery_loop():
     while True:
         try:
-            stats = load_json(STATS_FILE, apex_supreme_stats)
+            await ensure_connected()
+            stats = await load_json_async(STATS_FILE, apex_supreme_stats)
             warm_start = stats.get("warmup_started_at")
             now_ts = time.time()
             cpu = None
@@ -973,8 +2502,7 @@ async def user_discovery_loop():
                 stats["warmup_started_at"] = warm_start
                 save_json(STATS_FILE, stats)
             stats = load_json(STATS_FILE, apex_supreme_stats)
-            mission_name = random.choice(list(SCOUTER_MISSIONS.keys()))
-            kw = random.choice(SCOUTER_MISSIONS[mission_name])
+            kw = random.choice(BUYER_INTENT_KEYWORDS) if BUYER_INTENT_KEYWORDS else random.choice(BUYER_PAIN_KEYWORDS)
             if not should_scrape_now():
                 await asyncio.sleep(600)
                 continue
@@ -988,22 +2516,121 @@ async def user_discovery_loop():
                 continue
             if random.random() < 0.35:
                 kw = random.choice(ESSENTIAL_HASHTAGS)
+            try:
+                potentials = load_json(POTENTIAL_TARGETS, [])
+            except Exception:
+                potentials = []
+            try:
+                verified = load_json(VERIFIED_INVITES_FILE, [])
+            except Exception:
+                verified = []
+            try:
+                q = load_json(CANDIDATE_QUEUE_FILE, [])
+            except Exception:
+                q = []
+            existing_ids = {it.get("id") for it in q}
+            for item in potentials[:20]:
+                link = item.get("link")
+                title = item.get("title") or ""
+                if not link or link in existing_ids:
+                    continue
+                tok = link.split('/')[-1]
+                if 'joinchat' in link or (tok or '').startswith('+'):
+                    q.append({"id": link, "title": title, "retry_after": 0, "attempts": 0})
+            for item in verified[:50]:
+                link = item.get("link")
+                title = item.get("title") or ""
+                if not link or link in existing_ids:
+                    continue
+                tok = link.split('/')[-1]
+                if 'joinchat' in link or (tok or '').startswith('+'):
+                    q.append({"id": link, "title": title, "retry_after": 0, "attempts": 0})
+            try:
+                save_json(CANDIDATE_QUEUE_FILE, q)
+            except Exception:
+                pass
             res = await client(functions.contacts.SearchRequest(q=kw, limit=20))
             chats = getattr(res, 'chats', []) or []
-            groups = load_json(PROCESSED_GROUPS, [])
+            groups = await load_json_async(PROCESSED_GROUPS, [])
             for ch in chats:
                 cid = getattr(ch, "id", None)
                 uname = getattr(ch, "username", None)
                 ident = f"https://t.me/{uname}" if uname else (f"channel_id:{cid}" if cid is not None else None)
                 if not ident:
                     continue
+                
+                # Pre-Gatekeeper: Seller-Shield (Title Scan)
+                title = getattr(ch, "title", "") or ""
+                if _blacklisted(title):
+                     # Add to REJECTED immediately to avoid re-scan
+                     try:
+                         rej = load_json(REJECTED_GROUPS, [])
+                         rej.append({"id": ident, "title": title, "reason": "trade_hub_precheck", "ts": time.time()})
+                         save_json(REJECTED_GROUPS, rej)
+                     except: pass
+                     # Also add to processed groups to avoid loop
+                     groups.append(ident)
+                     save_json(PROCESSED_GROUPS, groups)
+                     logger.info(f"🚫 [Gatekeeper] Skipped Seller Hub: {title}")
+                     continue
+                if not _title_buyer_hit(title):
+                    # Skip low buyer-intent titles
+                    try:
+                        rej = await load_json_async(REJECTED_GROUPS, [])
+                        rej.append({"id": ident, "title": title, "reason": "low_buyer_intent_title", "ts": time.time()})
+                        await save_json_async(REJECTED_GROUPS, rej)
+                    except Exception as e:
+                        logger.warning(f"Failed to save rejected group (low intent): {e}")
+                    continue
+
                 if ident in groups:
                     continue
                 groups.append(ident)
                 save_json(PROCESSED_GROUPS, groups)
-                is_rich, reason = await gatekeeper(ch if not uname else ident)
-                if is_rich:
-                    stats["rich_joined"] += 1
+                try:
+                    cd = load_json(RESOLVE_COOLDOWN_FILE, {})
+                except Exception:
+                    cd = {}
+                if uname and uname in cd and cd[uname] > time.time():
+                    continue
+                try:
+                    q = load_json(CANDIDATE_QUEUE_FILE, [])
+                except Exception:
+                    q = []
+                if any(it.get("id") == ident for it in q):
+                    continue
+                q.append({"id": ident, "title": title, "retry_after": 0, "attempts": 0})
+                save_json(CANDIDATE_QUEUE_FILE, q)
+            try:
+                q = load_json(CANDIDATE_QUEUE_FILE, [])
+            except Exception:
+                q = []
+            now_t = time.time()
+            try:
+                cd = load_json(RESOLVE_COOLDOWN_FILE, {})
+            except Exception:
+                cd = {}
+            global_cool = cd.get("__global__")
+            q_sorted = sorted(q, key=lambda it: (-_candidate_score(it.get("id"), it.get("title")), it.get("retry_after", 0)))
+            if global_cool and float(global_cool) > now_t:
+                q_sorted = [it for it in q_sorted if ('joinchat' in (it.get('id') or '')) or ((it.get('id') or '').split('/')[-1]).startswith('+')]
+            q_ready = [it for it in q_sorted if float(it.get("retry_after", 0) or 0) <= now_t]
+            processed = 0
+            limit_batch = 1 if (global_cool and float(global_cool) > now_t) else 5
+            for it in q_ready[:limit_batch]:
+                ident = it.get("id")
+                title = it.get("title")
+                ok, reason = await gatekeeper(ident)
+                it["attempts"] = int(it.get("attempts", 0)) + 1
+                if not ok:
+                    it["retry_after"] = now_t + 3600
+                processed += 1
+            try:
+                save_json(CANDIDATE_QUEUE_FILE, q)
+            except Exception:
+                pass
+            stats = load_json(STATS_FILE, apex_supreme_stats)
+            if processed > 0:
                 save_json(STATS_FILE, stats)
             interval = 1800 if os.environ.get("AURA_MODE", "").lower() == "testing" else 14400
             await asyncio.sleep(interval)
@@ -1045,6 +2672,7 @@ async def navigate_tosearch(keyword, max_pages=3, max_links=8):
 async def humanization_loop():
     while True:
         try:
+            await ensure_connected()
             dialogs = await client.get_dialogs(limit=10)
             public_dialogs = [d for d in dialogs if d.is_channel or d.is_group]
             if public_dialogs:
@@ -1057,7 +2685,8 @@ async def humanization_loop():
                          await client(functions.messages.SendReactionRequest(
                              peer=target, msg_id=msgs[0].id, reaction=[ReactionEmoji(emoticon='ðŸ‘')]
                          ))
-                     except: pass
+                     except Exception as e:
+                         logger.debug(f"Reaction failed: {e}")
             
             await asyncio.sleep(21600) # 6h
         except Exception as e:
@@ -1096,7 +2725,7 @@ async def handle_v21_logic(event):
             return
         conv_terms = ["trial", "test line", "ready to buy", "how much", "send details", "ok send", "price", "subscribe", "subscription"]
         is_conversion = any(k in text for k in conv_terms)
-        pre_count = get_responses_count(user_id)
+        pre_count = await get_responses_count(user_id)
         if is_conversion:
             update_prospect_status(user_id, "converted", opt_out=False, increment_response=True)
             record_keyword_hits(event.raw_text, converted=True)
@@ -1144,44 +2773,98 @@ async def handle_v21_logic(event):
         
         # Threshold: 7 (was 8)
         if s >= 7 or any(t in text for t in basic_terms):
+            try:
+                evx = evaluate_lead_message(event.raw_text or "", sender)
+                if evx == "REJECT":
+                    await _output_status("STATUS: REJECT")
+                    return
+                else:
+                    await _output_status("STATUS: PROCEED")
+            except Exception:
+                pass
             msg_ts = getattr(event.message, "date", datetime.datetime.now()).isoformat()
-            persona_id = choose_persona_id()
-            save_prospect(user_id, username, event.raw_text, event.id, msg_ts, group_id, group_title, persona_id, "not_contacted")
+            persona_id = choose_persona_id(group_title)
+            try:
+                src = await get_group_source(group_id)
+            except Exception:
+                src = ""
+            save_prospect(user_id, username, event.raw_text, event.id, msg_ts, group_id, group_title, persona_id, "not_contacted", src or "")
             record_keyword_hits(event.raw_text, converted=False)
             log_activity("prospect_identified", f"{user_id}:{group_title}:{event.id}")
             
         # Conversation Watchlist Escalation (5-minute watch)
         now = time.time()
         exp = watchlist.get(event.sender_id)
-        if exp and now <= exp and s >= 7: # Lowered threshold
+        if exp and now <= exp and s >= 7:
             user_id = event.sender_id
-            if user_id not in queued_handshakes and should_queue_handshake(user_id):
+            if user_id not in queued_handshakes and await should_queue_handshake(user_id):
                 group_title = getattr(event.chat, "title", "group")
-                queued_handshakes[user_id] = {
-                    "msg_id": event.id,
-                    "chat_id": event.chat_id,
-                    "due": time.time() + random.randint(300, 600), # 5-10m
-                    "snippet": event.raw_text[:120],
-                    "group_title": group_title
-                }
+                ms = marketing_sentiment_score(event.raw_text or "")
+                if ms <= 20:
+                    queued_handshakes[user_id] = {
+                        "msg_id": event.id,
+                        "chat_id": event.chat_id,
+                        "due": time.time() + random.randint(300, 600),
+                        "snippet": event.raw_text[:120],
+                        "group_title": group_title
+                    }
             watchlist.pop(event.sender_id, None)
         elif s < 4 and event.sender_id not in watchlist: # Adjusted low score check
             watchlist[event.sender_id] = now + 300
         
         # Potential Lead Handshake (Random selection)
         # Threshold: 7 (was 12)
-        if (s >= 7 or any(val in text for val in TIER_1_INDICATORS)) and random.random() < 0.6: # Slightly increased probability
+        if (s >= 7 or any(val in text for val in TIER_1_INDICATORS)) and random.random() < 0.6:
+            try:
+                evy = evaluate_lead_message(event.raw_text or "", sender)
+                if evy == "REJECT":
+                    await _output_status("STATUS: REJECT")
+                    return
+            except Exception:
+                pass
             user_id = event.sender_id
-            if user_id not in queued_handshakes and should_queue_handshake(user_id):
+            if user_id not in queued_handshakes and await should_queue_handshake(user_id):
                 group_title = getattr(event.chat, "title", "group")
-                queued_handshakes[user_id] = {
-                    "msg_id": event.id,
-                    "chat_id": event.chat_id,
-                    "due": time.time() + random.randint(600, 900), # 10-15m
-                    "snippet": event.raw_text[:120],
-                    "group_title": group_title
-                }
+                ms = marketing_sentiment_score(event.raw_text or "")
+                if ms <= 20:
+                    queued_handshakes[user_id] = {
+                        "msg_id": event.id,
+                        "chat_id": event.chat_id,
+                        "due": time.time() + random.randint(600, 900),
+                        "snippet": event.raw_text[:120],
+                        "group_title": group_title
+                    }
                 logger.info(f"Queued Handshake for {user_id} in 10-15m (Score: {s}).")
+        try:
+            links = _extract_tme_links(event.raw_text or "")
+            for ln in links:
+                try:
+                    token = ln.split('/')[-1]
+                    title = ""
+                    members = 0
+                    if 'joinchat' in ln or token.startswith('+'):
+                        try:
+                            invite = await client(CheckChatInviteRequest(token.lstrip('+')))
+                            chat_obj = getattr(invite, 'chat', invite)
+                            title = getattr(chat_obj, 'title', '') or ''
+                            members = getattr(chat_obj, 'participants_count', 0) or 0
+                        except Exception:
+                            continue
+                    else:
+                        try:
+                            ent = await client.get_input_entity(ln)
+                            full = await client(GetFullChannelRequest(ent))
+                            full_chat = getattr(full, 'full_chat', None)
+                            title = getattr(getattr(full, 'chats', [{}])[0], 'title', '') or ''
+                            members = getattr(full_chat, 'participants_count', 0) or 0
+                        except Exception:
+                            continue
+                    if members and members > 100 and _title_hit(title) and not _blacklisted(title):
+                        _save_potential(ln, title, members, group_id)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 async def handshake_processor():
     """V2.1: Perform heuristic reactions 10-15m before outreach."""
@@ -1213,7 +2896,7 @@ async def handshake_processor():
                         logger.error(f"Handshake failed: {e}")
 
                     try:
-                        if user_opted_out(u):
+                        if await user_opted_out(u):
                             logger.info("Skipping DM (user opted out).")
                             continue
                         if not market_hour_ok():
@@ -1234,47 +2917,12 @@ async def handshake_processor():
                             if not uname:
                                 logger.info("Skipping DM (no username).")
                                 continue
-                            photo_ok = False
-                            try:
-                                photo_ok = bool(getattr(getattr(fu, "user", None), "photo", None) or getattr(getattr(fu, "full_user", None), "profile_photo", None))
-                            except Exception:
-                                photo_ok = False
-                            if not photo_ok:
-                                logger.info("Skipping DM (no profile photo).")
-                                continue
-                            common = getattr(fu.full_user, "common_chats_count", 0)
-                            if common <= 0:
-                                logger.info("Skipping DM (no mutual context).")
-                                continue
                             lead_premium = bool(getattr(getattr(fu, "user", None), "premium", False))
                         except (UserPrivacyRestrictedError, PeerIdInvalidError):
                             logger.info("Skipping DM (privacy or invalid peer).")
                             continue
-                        try:
-                            status = getattr(fu, "user", None)
-                            status = getattr(status, "status", None) if status else None
-                            if not status:
-                                status = getattr(getattr(fu, "full_user", None), "status", None)
-                            recent_ok = False
-                            now_ts = datetime.datetime.now(datetime.timezone.utc)
-                            if isinstance(status, (UserStatusOnline, UserStatusRecently)):
-                                recent_ok = True
-                            elif isinstance(status, UserStatusOffline):
-                                dt = getattr(status, "was_online", None)
-                                if dt:
-                                    if dt.tzinfo is None:
-                                        dt = dt.replace(tzinfo=datetime.timezone.utc)
-                                    if (now_ts - dt) <= datetime.timedelta(days=4):
-                                        recent_ok = True
-                            elif isinstance(status, (UserStatusLastWeek, UserStatusLastMonth)):
-                                recent_ok = False
-                            else:
-                                recent_ok = False
-                            if not recent_ok:
-                                logger.info("Skipping DM (user inactive beyond 4 days).")
-                                continue
-                        except Exception as _e:
-                            logger.error(f"User status check error: {_e}")
+                        if not quality_gate(fu):
+                            logger.info("Skipping DM (failed quality gate).")
                             continue
                         social_hint = ""
                         try:
@@ -1289,61 +2937,12 @@ async def handshake_processor():
                             pass
                         await typing_heartbeat(u, random.uniform(6, 9))
                         dm_text = None
-                        persona_id = get_prospect_persona(u, chat_id) or choose_persona_id()
+                        persona_id = await get_prospect_persona(u, chat_id) or choose_persona_id(group_title)
                         try:
-                            snippet_lower = (snippet or "").lower()
-                            rebrand_focus = any(v in snippet_lower for v in REBRAND_KEYWORDS)
-                            pain_focus = any(v in snippet_lower for v in URGENCY_KEYWORDS)
-                            competitor_focus = any(v in snippet_lower for v in COMPETITOR_KEYWORDS)
-
-                            branding_line = (" we can rebrand the app with your logo and color scheme." if rebrand_focus 
-                                             else " i can match your brand (logo/colors) inside the app.")
-                            
-                            ai_context_instruction = ""
-                            if pain_focus:
-                                ai_context_instruction = "User is frustrated. Emphasize that our solution FIXES buffering/blocks immediately. Be empathetic."
-                            elif rebrand_focus:
-                                ai_context_instruction = "User wants rebranding. Focus on 'White Label', 'Custom Logo', and 'DNS Hardcoding'. Be professional."
-                            elif competitor_focus:
-                                ai_context_instruction = "User mentions a competitor. Subtle comparison: 'Aura Apex is more stable/customizable'."
-
-                            if ai_client:
-                                s = calculate_lead_score(snippet, getattr(fu, "user", None))
-                                style_hint = "use helpful peer tone"
-                                if s >= 7 and rebrand_focus:
-                                    style_hint = "use expert consultant tone and mention rebranding"
-                                context_hint = (social_hint + " " + ai_context_instruction).strip()
-                                dm_text = await generate_ai_dm(uname or "there", group_title, snippet, s, context_hint, style_hint)
-                                if dm_text:
-                                    if len(dm_text) > 220:
-                                        dm_text = dm_text[:220]
-                                    if ("logo" not in dm_text.lower()) and ("color" not in dm_text.lower()):
-                                        dm_text = (dm_text + branding_line).strip()
-                            else:
-                                if persona_id == "expert":
-                                    base = f"saw your note in {group_title}. likely dns/portal handshake."
-                                    proof = f" {social_hint}" if social_hint else ""
-                                    svc = " 4k sports, catchup, anti-freeze available."
-                                    cta = " are you on tivimate or a different player? i have specific guides and can rebrand the app with your logo and color scheme."
-                                    dm_text = f"{base}{proof}{svc}{cta}"
-                                elif persona_id == "peer":
-                                    base = f"same thing happened in {group_title} last week."
-                                    proof = f" {social_hint}" if social_hint else ""
-                                    svc = " stable streams with 4k options and support."
-                                    cta = " are you on tivimate or something else? i can share the exact setup and rebrand with your logo and color palette."
-                                    dm_text = f"{base}{proof}{svc}{cta}"
-                                else:
-                                    svc = " no-buffer line, sports, catchup."
-                                    cta = " using tivimate or another player? i can send the setup for yours and handle rebranding with your logo/colors."
-                                    dm_text = f"still need a stable trial from the group?{svc}{cta}"
+                            dm_text = compose_aiden_dm(snippet or "", group_title, _detect_tech_context(snippet or ""))
                         except Exception as e:
-                            logger.error(f"Groq DM compose error: {e}")
-                            if persona_id == "expert":
-                                dm_text = f"noticed your note in {group_title}. dns/portal fix worked for me. want steps?"
-                            elif persona_id == "peer":
-                                dm_text = "had same issueâ€”switched panels and itâ€™s solid now. want details?"
-                            else:
-                                dm_text = "want a stable trial link? i can share privately."
+                            logger.error(f"Aiden DM compose error: {e}")
+                            dm_text = compose_aiden_dm(snippet or "", group_title, _detect_tech_context(snippet or ""))
 
                         try:
                             bio_text = getattr(getattr(fu, "full_user", None), "about", "") or ""
@@ -1399,6 +2998,37 @@ async def typing_heartbeat(entity, duration=6.0):
             await asyncio.sleep(3)
     except Exception:
         pass
+def quality_gate(full_user):
+    try:
+        usr = getattr(full_user, "user", None)
+        fu = getattr(full_user, "full_user", None)
+        photo = False
+        try:
+            photo = bool(getattr(usr, "photo", None) or getattr(fu, "profile_photo", None))
+        except Exception:
+            photo = False
+        if not photo:
+            return False
+        st = None
+        try:
+            st = getattr(usr, "status", None) or getattr(fu, "status", None)
+        except Exception:
+            st = None
+        if isinstance(st, types.UserStatusEmpty):
+            return False
+        now_ts = datetime.datetime.now(datetime.timezone.utc)
+        if isinstance(st, (UserStatusOnline, UserStatusRecently)):
+            return True
+        if isinstance(st, UserStatusOffline):
+            dt = getattr(st, "was_online", None)
+            if dt:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
+                if (now_ts - dt) <= datetime.timedelta(days=3):
+                    return True
+        return False
+    except Exception:
+        return False
 # --- Command Deck ---
 
 @client.on(events.NewMessage(pattern='/health'))
@@ -1447,14 +3077,44 @@ async def export_db(event):
     except Exception as e:
         await event.reply(f"Export failed: {e}")
 
+@client.on(events.NewMessage(pattern='/source_kpi'))
+async def source_kpi(event):
+    if not event.is_private: return
+    try:
+        stats = {}
+        async with aiosqlite.connect(DB_FILE) as db:
+            query = """
+                SELECT COALESCE(source, ''), COUNT(*) as total,
+                       SUM(CASE WHEN responded = 1 THEN 1 ELSE 0 END) as replies
+                FROM prospects
+                GROUP BY source
+            """
+            async with db.execute(query) as cursor:
+                results = await cursor.fetchall()
+                for source, total, replies in results:
+                    rate = (replies / total * 100.0) if total > 0 else 0.0
+                    stats[source or "unknown"] = {"total": total, "rate": f"{rate:.2f}%"}
+        report = "📈 Source Performance Report\n"
+        for src, data in stats.items():
+            report += f"🔹 {str(src).upper()}: {data['total']} leads | {data['rate']} reply rate\n"
+        try:
+            aid = ADMIN_LEADS_CHANNEL_ID
+            if aid:
+                await client.send_message(int(aid) if str(aid).isdigit() else aid, report)
+            else:
+                await event.reply(report)
+        except Exception:
+            await event.reply(report)
+    except Exception as e:
+        await event.reply(f"Error generating KPI: {str(e)[:140]}")
+
 async def historical_scan_loop():
     while True:
         try:
-            conn = sqlite3.connect(DB_FILE, timeout=30)
-            c = conn.cursor()
-            c.execute("SELECT group_id, last_scanned_id, title FROM joined_groups WHERE banned = 0")
-            rows = c.fetchall()
-            conn.close()
+            async with aiosqlite.connect(DB_FILE, timeout=30) as conn:
+                async with conn.execute("SELECT group_id, last_scanned_id, title FROM joined_groups WHERE banned = 0") as cursor:
+                    rows = await cursor.fetchall()
+            
             for group_id, last_scanned_id, title in rows:
                 try:
                     if last_scanned_id and last_scanned_id > 0:
@@ -1491,37 +3151,52 @@ async def historical_scan_loop():
                         user_id = getattr(m, "sender_id", None)
                         if user_id:
                             try:
+                                sender = None
                                 username = None
                                 try:
                                     sender = await m.get_sender()
                                     username = getattr(sender, "username", None)
                                 except Exception:
+                                    sender = None
                                     username = None
+                                try:
+                                    evh = evaluate_lead_message(text or "", sender)
+                                    if evh == "REJECT":
+                                        await _output_status("STATUS: REJECT")
+                                        continue
+                                    else:
+                                        await _output_status("STATUS: PROCEED")
+                                except Exception:
+                                    pass
                                 msg_ts = getattr(m, "date", datetime.datetime.now()).isoformat()
-                                persona_id = choose_persona_id()
-                                save_prospect(user_id, username, text, m.id, msg_ts, group_id, title or "group", persona_id, "not_contacted")
+                                persona_id = choose_persona_id(title or "group")
+                                try:
+                                    src = await get_group_source(group_id)
+                                except Exception:
+                                    src = ""
+                                save_prospect(user_id, username, text, m.id, msg_ts, group_id, title or "group", persona_id, "not_contacted", src or "")
                                 record_keyword_hits(text, converted=False)
                                 log_activity("prospect_identified_history", f"{user_id}:{title}:{m.id}")
                                 if s >= 12 and user_id not in queued_handshakes:
-                                    due_in = random.randint(600, 900)
-                                    queued_handshakes[user_id] = {
-                                        "msg_id": m.id,
-                                        "chat_id": group_id,
-                                        "due": time.time() + due_in,
-                                        "snippet": text[:120],
-                                        "group_title": title or "group"
-                                    }
+                                    ms = marketing_sentiment_score(text or "")
+                                    if ms <= 20:
+                                        due_in = random.randint(600, 900)
+                                        queued_handshakes[user_id] = {
+                                            "msg_id": m.id,
+                                            "chat_id": group_id,
+                                            "due": time.time() + due_in,
+                                            "snippet": text[:120],
+                                            "group_title": title or "group"
+                                        }
                             except Exception as e:
                                 logger.error(f"History prospect error: {e}")
                     if not max_id or m.id > max_id:
                         max_id = m.id
                 if max_id and max_id != last_scanned_id:
                     try:
-                        conn2 = sqlite3.connect(DB_FILE, timeout=30)
-                        c2 = conn2.cursor()
-                        c2.execute("UPDATE joined_groups SET last_scanned_id = ? WHERE group_id = ?", (max_id, group_id))
-                        conn2.commit()
-                        conn2.close()
+                        async with aiosqlite.connect(DB_FILE, timeout=30) as conn2:
+                            await conn2.execute("UPDATE joined_groups SET last_scanned_id = ? WHERE group_id = ?", (max_id, group_id))
+                            await conn2.commit()
                     except Exception as e:
                         logger.error(f"Update last_scanned_id error: {e}")
                 await asyncio.sleep(5)
@@ -1534,21 +3209,19 @@ async def prune_dead_chats_loop():
     while True:
         try:
             cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)).isoformat()
-            conn = sqlite3.connect(DB_FILE, timeout=60)
-            c = conn.cursor()
-            c.execute("SELECT group_id, title FROM joined_groups WHERE banned = 0 AND archived = 0")
-            rows = c.fetchall()
-            conn.close()
+            async with aiosqlite.connect(DB_FILE, timeout=60) as conn:
+                async with conn.execute("SELECT group_id, title FROM joined_groups WHERE banned = 0 AND archived = 0") as cursor:
+                    rows = await cursor.fetchall()
+            
             for group_id, title in rows:
                 try:
-                    conn2 = sqlite3.connect(DB_FILE, timeout=30)
-                    c2 = conn2.cursor()
-                    c2.execute("SELECT COUNT(*) FROM prospects WHERE group_id = ? AND message_ts >= ?", (group_id, cutoff))
-                    cnt = c2.fetchone()[0]
-                    c2.execute("SELECT quality_score FROM leads WHERE group_title = ? ORDER BY timestamp DESC LIMIT 1", (title,))
-                    row = c2.fetchone()
+                    async with aiosqlite.connect(DB_FILE, timeout=30) as conn2:
+                        async with conn2.execute("SELECT COUNT(*) FROM prospects WHERE group_id = ? AND message_ts >= ?", (group_id, cutoff)) as cursor:
+                            cnt = (await cursor.fetchone())[0]
+                        async with conn2.execute("SELECT quality_score FROM leads WHERE group_title = ? ORDER BY timestamp DESC LIMIT 1", (title,)) as cursor:
+                            row = await cursor.fetchone()
+
                     qscore = row[0] if row else 0
-                    conn2.close()
                 except Exception as e:
                     logger.error(f"Prune query error: {e}")
                     continue
@@ -1558,14 +3231,13 @@ async def prune_dead_chats_loop():
                     except Exception as e:
                         logger.error(f"Prune leave error: {e}")
                     try:
-                        conn3 = sqlite3.connect(DB_FILE, timeout=30)
-                        c3 = conn3.cursor()
-                        c3.execute("UPDATE joined_groups SET archived = 1 WHERE group_id = ?", (group_id,))
-                        conn3.commit()
-                        conn3.close()
+                        async with aiosqlite.connect(DB_FILE, timeout=30) as conn3:
+                            await conn3.execute("UPDATE joined_groups SET archived = 1 WHERE group_id = ?", (group_id,))
+                            await conn3.commit()
                         log_activity("group_archived", f"{group_id}:{title}")
                     except Exception as e:
                         logger.error(f"Prune archive error: {e}")
+
                 await asyncio.sleep(2)
             await asyncio.sleep(43200) # run twice a day
         except Exception as e:
@@ -1577,39 +3249,39 @@ async def stats_report():
         await asyncio.sleep(43200) # 12h
         try:
             stats = load_json(STATS_FILE, apex_supreme_stats)
-            conn = sqlite3.connect(DB_FILE, timeout=60)
-            try:
-                count = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
-            except:
-                count = 0
-            prospects_total = 0
-            contacted = 0
-            responded = 0
-            opt_outs = 0
-            conversions = 0
-            try:
-                cur = conn.cursor()
-                cur.execute("SELECT COUNT(*) FROM prospects")
-                row = cur.fetchone()
-                prospects_total = row[0] if row else 0
-                cur.execute("SELECT COUNT(*) FROM prospects WHERE status IN ('contacted','converted')")
-                row = cur.fetchone()
-                contacted = row[0] if row else 0
-                cur.execute("SELECT COUNT(*) FROM prospects WHERE status IN ('responded','converted')")
-                row = cur.fetchone()
-                responded = row[0] if row else 0
-                cur.execute("SELECT COUNT(*) FROM prospects WHERE opt_out = 1")
-                row = cur.fetchone()
-                opt_outs = row[0] if row else 0
-                cur.execute("SELECT COUNT(*) FROM prospects WHERE status = 'converted'")
-                row = cur.fetchone()
-                conversions = row[0] if row else 0
-            except Exception as e:
-                logger.error(f"Prospect stats error: {e}")
-            conn.close()
+            async with aiosqlite.connect(DB_FILE, timeout=60) as conn:
+                try:
+                    async with conn.execute("SELECT COUNT(*) FROM leads") as cursor:
+                        count = (await cursor.fetchone())[0]
+                except:
+                    count = 0
+                prospects_total = 0
+                contacted = 0
+                responded = 0
+                opt_outs = 0
+                conversions = 0
+                try:
+                    async with conn.execute("SELECT COUNT(*) FROM prospects") as cursor:
+                        row = await cursor.fetchone()
+                        prospects_total = row[0] if row else 0
+                    async with conn.execute("SELECT COUNT(*) FROM prospects WHERE status IN ('contacted','converted')") as cursor:
+                        row = await cursor.fetchone()
+                        contacted = row[0] if row else 0
+                    async with conn.execute("SELECT COUNT(*) FROM prospects WHERE status IN ('responded','converted')") as cursor:
+                        row = await cursor.fetchone()
+                        responded = row[0] if row else 0
+                    async with conn.execute("SELECT COUNT(*) FROM prospects WHERE opt_out = 1") as cursor:
+                        row = await cursor.fetchone()
+                        opt_outs = row[0] if row else 0
+                    async with conn.execute("SELECT COUNT(*) FROM prospects WHERE status = 'converted'") as cursor:
+                        row = await cursor.fetchone()
+                        conversions = row[0] if row else 0
+                except Exception as e:
+                    logger.error(f"Prospect stats error: {e}")
             
             # Randomized Growth logic: 5-12%
             growth = random.uniform(0.05, 0.12)
+
             stats["day_counter"] += 1
             save_json(STATS_FILE, stats)
 
@@ -1646,6 +3318,246 @@ async def stats_report():
         except Exception as e:
             logger.error(f"Stats Report Error: {e}")
 
+async def _get_group_entity_from_link(link):
+    try:
+        ent = await resolve_entity_safe(link)
+        return ent
+    except Exception:
+        return None
+
+async def _get_group_metadata(entity):
+    try:
+        full = await client(GetFullChannelRequest(entity))
+        ch = getattr(full, 'chats', None)
+        if hasattr(full, 'full_chat') and getattr(full.full_chat, 'participants_count', None) is not None:
+            members = int(full.full_chat.participants_count or 0)
+        else:
+            members = 0
+        title = getattr(full.chats[0], 'title', None) if (ch and len(ch) > 0) else getattr(entity, 'title', None) or ""
+        return title or "", members
+    except Exception:
+        try:
+            chat = await client.get_entity(entity)
+            title = getattr(chat, 'title', '') or ''
+            members = int(getattr(chat, 'participants_count', 0) or 0)
+            return title, members
+        except Exception:
+            return "", 0
+
+async def _compute_engagement(entity):
+    try:
+        msgs = await client.get_messages(entity, limit=100)
+    except Exception:
+        msgs = []
+    now = datetime.datetime.utcnow()
+    count_last_7d = 0
+    reactions_total = 0
+    reactions_counted = 0
+    last_activity_hours = None
+    for m in msgs:
+        dt = getattr(m, 'date', None)
+        if dt:
+            age = (now - dt.replace(tzinfo=None)).total_seconds() / 3600.0
+            if last_activity_hours is None or age < last_activity_hours:
+                last_activity_hours = age
+            if age <= 24*7:
+                count_last_7d += 1
+        rx = getattr(m, 'reactions', None)
+        if rx and hasattr(rx, 'reactions'):
+            try:
+                reactions_total += sum(int(getattr(r, 'count', 0) or 0) for r in rx.reactions)
+                reactions_counted += 1
+            except Exception:
+                pass
+    msgs_per_day = count_last_7d / 7.0 if count_last_7d else 0.0
+    reactions_avg = (reactions_total / max(1, reactions_counted)) if reactions_counted else 0.0
+    return {"messages_per_day": msgs_per_day, "last_activity_hours": last_activity_hours or 1e9, "reactions_avg": reactions_avg}
+
+def _detect_entry_requirements(link, title, desc_texts):
+    req = "public"
+    if 'joinchat' in str(link) or (str(link).split('/')[-1] or '').startswith('+'):
+        req = "invite"
+    ver = "none"
+    blob = ' '.join([title or ''] + desc_texts).lower()
+    if any(k in blob for k in ["verify", "verification", "captcha", "approval", "whitelist", "application"]):
+        ver = "manual"
+    if any(k in blob for k in ["bot", "/start", "questionnaire", "form"]):
+        if ver == "none":
+            ver = "automated"
+    return req, ver
+
+def _detect_contact_protocols(title, desc_texts):
+    blob = ' '.join([title or ''] + desc_texts)
+    items = []
+    if re.search(r'@[\w_]{3,}', blob):
+        items.append("dm_username")
+    if re.search(r'/start', blob, flags=re.IGNORECASE):
+        items.append("bot_command")
+    if re.search(r'(email|mailto:)', blob, flags=re.IGNORECASE):
+        items.append("email")
+    if re.search(r'(form|google forms|typeform)', blob, flags=re.IGNORECASE):
+        items.append("form")
+    return list(dict.fromkeys(items))
+
+def _buyer_intent_texts(texts):
+    t = ' '.join(texts).lower()
+    if any(k in t for k in SELLER_SHIELD_TERMS):
+        return False
+    hit = 0
+    for k in BUYER_PAIN_KEYWORDS:
+        if k.lower() in t:
+            hit += 1
+    return hit >= 1
+
+def _trust_score(members, eng, sources_count, buyer_ok):
+    s = 0
+    if members >= 100:
+        s += 10
+    if members >= 1000:
+        s += 10
+    if eng.get("messages_per_day", 0) >= 5:
+        s += 10
+    if eng.get("last_activity_hours", 1e9) <= 72:
+        s += 10
+    if buyer_ok:
+        s += 10
+    if sources_count >= 2:
+        s += 10
+    return s
+
+async def build_prospect_catalog(limit=60, use_processed=True):
+    items = []
+    seen = set()
+    sources_map = {}
+    if use_processed and os.path.exists(PROCESSED_GROUPS):
+        try:
+            g = load_json(PROCESSED_GROUPS, [])
+        except Exception:
+            g = []
+        for ln in g:
+            if ln and ln not in seen:
+                seen.add(ln)
+                items.append(ln)
+                sources_map[ln] = ["processed"]
+    try:
+        pot = load_json(POTENTIAL_TARGETS, [])
+    except Exception:
+        pot = []
+    for it in pot:
+        ln = str(it.get("link", "") or "")
+        if ln and ln not in seen:
+            seen.add(ln)
+            items.append(ln)
+            arr = sources_map.get(ln, [])
+            arr.append("potential_targets")
+            sources_map[ln] = list(dict.fromkeys(arr))
+    if len(items) < limit:
+        need = limit - len(items)
+        kws = BUYER_PAIN_KEYWORDS[:]
+        random.shuffle(kws)
+        for kw in kws[:max(3, min(8, len(kws)))]:
+            try:
+                links = await _scrape_search_pages(kw, max_links=need)
+            except Exception:
+                links = []
+            links = links or []
+            links = sorted(links, key=lambda ln: not ('joinchat' in ln or (ln.split('/')[-1] or '').startswith('+')))
+            for ln in links:
+                if ln and ln not in seen:
+                    seen.add(ln)
+                    items.append(ln)
+                    arr = sources_map.get(ln, [])
+                    arr.append(f"search:{kw}")
+                    sources_map[ln] = list(dict.fromkeys(arr))
+                if len(items) >= limit:
+                    break
+            if len(items) >= limit:
+                break
+    out = []
+    for ln in items[:limit]:
+        try:
+            ent = await _get_group_entity_from_link(ln)
+            if not ent:
+                continue
+            title, members = await _get_group_metadata(ent)
+            desc_texts = []
+            try:
+                msgs = await client.get_messages(ent, limit=10)
+                for m in msgs:
+                    if m.text:
+                        desc_texts.append(m.text[:280])
+            except Exception:
+                pass
+            eng = await _compute_engagement(ent)
+            req, ver = _detect_entry_requirements(ln, title, desc_texts)
+            cp = _detect_contact_protocols(title, desc_texts)
+            buyer_ok = _buyer_intent_texts([title] + desc_texts)
+            sc = _trust_score(members, eng, len(sources_map.get(ln, [])), buyer_ok)
+            rec = {
+                "platform": "Telegram",
+                "group_name": title,
+                "url": ln,
+                "group_size": members,
+                "engagement": eng,
+                "entry_requirements": req,
+                "verification": ver,
+                "contact_protocols": cp,
+                "sources": sources_map.get(ln, []),
+                "buyer_intent": bool(buyer_ok),
+                "last_validated": int(time.time()),
+                "trust_score": sc
+            }
+            out.append(rec)
+        except Exception:
+            pass
+    try:
+        save_json(PROSPECT_CATALOG_FILE, out)
+    except Exception:
+        pass
+    if not out and use_processed and os.path.exists(PROCESSED_GROUPS):
+        try:
+            groups = load_json(PROCESSED_GROUPS, [])
+        except Exception:
+            groups = []
+        ph = []
+        for ln in groups[:limit]:
+            try:
+                slug = (ln.split('/')[-1] or '').strip()
+                title = slug
+                req = "invite" if ('joinchat' in ln or (slug or '').startswith('+')) else "public"
+                buyer_ok = not any(k in slug.lower() for k in SELLER_SHIELD_TERMS)
+                rec = {
+                    "platform": "Telegram",
+                    "group_name": title,
+                    "url": ln,
+                    "group_size": 0,
+                    "engagement": {"messages_per_day": 0.0, "last_activity_hours": 1e9, "reactions_avg": 0.0},
+                    "entry_requirements": req,
+                    "verification": "none",
+                    "contact_protocols": [],
+                    "sources": ["processed"],
+                    "buyer_intent": bool(buyer_ok),
+                    "last_validated": int(time.time()),
+                    "trust_score": 0
+                }
+                ph.append(rec)
+            except Exception:
+                pass
+        try:
+            save_json(PROSPECT_CATALOG_FILE, ph)
+        except Exception:
+            pass
+        return ph
+    return out
+
+async def run_prospect_catalog_build(limit=60, use_processed=True):
+    try:
+        await client.connect()
+    except Exception:
+        pass
+    res = await build_prospect_catalog(limit=limit, use_processed=use_processed)
+    return res
+
 async def noise_generation_loop():
     bots = ['@IFTTT', '@Stickers']
     searches = ["weather", "movies", "recipes", "football", "traffic", "music"]
@@ -1665,10 +3577,22 @@ async def noise_generation_loop():
         await asyncio.sleep(random.randint(43200, 172800))
 
 async def main():
-    print("Initializing AURA APEX SUPREME V2.1: FORTRESS HARDENING...")
-    init_db()
-    migrate_db()
+    logger.info("Initializing AURA APEX SUPREME V2.1: FORTRESS HARDENING...")
+    await init_db()
+    await migrate_db()
+    if os.environ.get("RUN_SPIDER_TEST") == "1" and os.environ.get("SPIDER_TEST_NO_TELEGRAM") == "1":
+        logger.info("Running Spider Module test (HTTP-only, no Telegram peek)...")
+        cnt = await spider_discover_once(max_keywords=2, max_links_per_kw=6, telethon_peek=False)
+        logger.info(f"Spider discovered {cnt} eligible targets in this quick run.")
+        return
     asyncio.create_task(db_writer_loop())
+    asyncio.create_task(potential_targets_dedupe_loop())
+    if (os.environ.get("RUN_PERF_40M") or "").strip() == "1":
+        try:
+            asyncio.create_task(performance_monitor(duration_sec=2400))
+            logger.info("Performance monitor (40m) started.")
+        except Exception as e:
+            logger.error(f"Failed to start performance monitor: {e}")
     async def ensure_qc_group_joined():
         stats = load_json(STATS_FILE, apex_supreme_stats)
         qc = stats.get("qc_groups", [])
@@ -1734,8 +3658,13 @@ async def main():
         else:
             await client.start(phone=PHONE_NUMBER, code_callback=_code_callback, password=os.environ.get("TELEGRAM_PASSWORD"))
 
+    if os.environ.get("RUN_SPIDER_TEST") == "1" and os.environ.get("SPIDER_TEST_NO_TELEGRAM") == "1":
+        logger.info("Running Spider Module test (HTTP-only, no Telegram peek)...")
+        cnt = await spider_discover_once(max_keywords=2, max_links_per_kw=6, telethon_peek=False)
+        logger.info(f"Spider discovered {cnt} eligible targets in this quick run.")
+        return
     await _start_with_retry()
-    print("ðŸ° Fortress V2.1 Active: Handshake + Hardware Spoofing + Randomized Growth.")
+    logger.info("Fortress V2.1 Active: Handshake + Hardware Spoofing + Randomized Growth.")
     qc_ok = False
     try:
         qc_ok = await ensure_qc_group_joined()
@@ -1743,6 +3672,44 @@ async def main():
             pass
     except Exception:
         qc_ok = False
+    if os.environ.get("TEST_JOIN_NOW") == "1":
+        try:
+            logger.info("Running immediate Scout Join test...")
+            # One discovery pass with real peek
+            _ = await spider_discover_once(max_keywords=2, max_links_per_kw=6, telethon_peek=True)
+            items = load_json(POTENTIAL_TARGETS, [])
+            candidates = []
+            for it in items:
+                link = str(it.get("link", ""))
+                title = str(it.get("title", ""))
+                members = int(it.get("members", 0) or 0)
+                if not link or members < 100:
+                    continue
+                if _blacklisted(title):
+                    continue
+                if await joined_link_exists(link):
+                    continue
+                candidates.append((members, title, link))
+            if not candidates:
+                logger.info("No eligible candidates found.")
+                return
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            top = candidates[0]
+            logger.info("Found a new lead-hub. Accessing now. 🛰️")
+            ok, reason = await gatekeeper(top[2])
+            if ok:
+                logger.info(f"Joined: {top[1]} ({top[0]} members)")
+            else:
+                logger.info(f"Join failed: {reason}")
+            return
+        except Exception as e:
+            logger.error(f"Immediate join test error: {e}")
+            return
+    if os.environ.get("RUN_SPIDER_TEST") == "1":
+        logger.info("Running Spider Module test (one pass)...")
+        cnt = await spider_discover_once(max_keywords=2, max_links_per_kw=6, telethon_peek=True)
+        logger.info(f"Spider discovered {cnt} eligible targets in this quick run.")
+        return
     asyncio.create_task(user_discovery_loop())
     asyncio.create_task(stats_report())
     if qc_ok:
@@ -1751,10 +3718,11 @@ async def main():
     asyncio.create_task(proxy_health_monitor(client, PROXY_FILE))
     asyncio.create_task(noise_generation_loop())
     asyncio.create_task(prune_dead_chats_loop())
+    asyncio.create_task(directory_scraper_loop())
     async def db_cleanup_loop():
         while True:
             try:
-                clean_old_logs(DB_FILE, days=7)
+                await clean_old_logs_async(DB_FILE, days=7)
                 await asyncio.sleep(43200)
             except Exception:
                 await asyncio.sleep(3600)
@@ -1808,8 +3776,54 @@ async def main():
             except Exception as e:
                 log_activity("qc_verify_error", str(e)[:140])
                 await asyncio.sleep(3600)
+    async def cached_invites_refresh_loop():
+        while True:
+            try:
+                await ensure_connected()
+                try:
+                    items = load_json(VERIFIED_INVITES_FILE, [])
+                except Exception:
+                    items = []
+                updated = []
+                now = time.time()
+                for it in items:
+                    link = str(it.get("link") or "")
+                    title = str(it.get("title") or "")
+                    if not link:
+                        continue
+                    ok = True
+                    try:
+                        tok = link.split('/')[-1]
+                        if 'joinchat' in link or (tok or '').startswith('+'):
+                            if tok.startswith('+'):
+                                tok = tok[1:]
+                            res = await client(CheckChatInviteRequest(tok))
+                            obj = getattr(res, 'chat', None) or getattr(res, 'message', None)
+                            ttl = getattr(obj, 'title', None) or title
+                            cnt = getattr(obj, 'participants_count', None)
+                            updated.append({"link": link, "title": ttl or "", "members": int(cnt or 0), "ts": now})
+                        else:
+                            ent = await client.get_input_entity(link)
+                            full = await client(GetFullChannelRequest(ent))
+                            ch = getattr(full, 'chats', [None])[0]
+                            name = getattr(ch, 'title', None) or title
+                            cnt = getattr(full.full_chat, 'participants_count', None)
+                            updated.append({"link": link, "title": name or "", "members": int(cnt or 0), "ts": now})
+                    except Exception:
+                        ok = False
+                    if not ok:
+                        pass
+                try:
+                    if updated:
+                        save_json(VERIFIED_INVITES_FILE, updated)
+                except Exception:
+                    pass
+                await asyncio.sleep(21600)
+            except Exception:
+                await asyncio.sleep(3600)
     client.loop.create_task(qc_group_autojoin_loop())
     client.loop.create_task(qc_membership_verifier_loop())
+    asyncio.create_task(cached_invites_refresh_loop())
 
     await client.run_until_disconnected()
 
@@ -1817,7 +3831,7 @@ if __name__ == '__main__':
     try:
         if os.environ.get("DRY_RUN") == "1":
             keep_alive()
-            print("DRY_RUN active: Health endpoint started on PORT. Skipping Telegram start.")
+            logger.info("DRY_RUN active: Health endpoint started on PORT. Skipping Telegram start.")
             while True:
                 time.sleep(60)
         else:
@@ -1835,7 +3849,7 @@ async def cmd_find(event):
         if not event.is_private:
             return
         q = event.pattern_match.group(1).strip().lower()
-        data = load_json("search_index.json", [])
+        data = await load_json_async("search_index.json", [])
         results = []
         for item in data:
             try:
@@ -1866,7 +3880,7 @@ async def cmd_status(event):
     try:
         if not event.is_private:
             return
-        stats = load_json(STATS_FILE, apex_supreme_stats)
+        stats = await load_json_async(STATS_FILE, apex_supreme_stats)
         try:
             import psutil  # noqa: F401
             cpu = psutil.cpu_percent(interval=0.5)
@@ -1894,4 +3908,62 @@ async def cmd_status(event):
             await event.reply(f"Status failed: {e}")
         except Exception:
             pass
-
+@client.on(events.NewMessage(pattern='/scout_join'))
+async def cmd_scout_join(event):
+    try:
+        if not event.is_private:
+            return
+        stats = load_json(STATS_FILE, apex_supreme_stats)
+        last_ts = stats.get("last_scout_join_ts")
+        now = time.time()
+        if last_ts and (now - float(last_ts)) < 14400:
+            await event.reply("Cooldown active. Try again later.")
+            return
+        items = load_json(POTENTIAL_TARGETS, [])
+        if not items:
+            await event.reply("No potential targets.")
+            return
+        candidates = []
+        for it in items:
+            link = str(it.get("link", ""))
+            title = str(it.get("title", ""))
+            members = int(it.get("members", 0) or 0)
+            if not link or members < 100:
+                continue
+            if _blacklisted(title):
+                continue
+            if await joined_link_exists(link):
+                continue
+            candidates.append((members, title, link))
+        if not candidates:
+            await event.reply("No eligible targets.")
+            return
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        top = candidates[0]
+        await event.reply("Found a new lead-hub. Accessing now. 🛰️")
+        ok, reason = await gatekeeper(top[2])
+        if ok:
+            stats["last_scout_join_ts"] = now
+            stats["rich_joined"] = stats.get("rich_joined", 0) + 1
+            save_json(STATS_FILE, stats)
+            await event.reply(f"Joined: {top[1]} ({top[0]} members)")
+        else:
+            await event.reply(str(reason))
+    except Exception as e:
+        try:
+            await event.reply(f"Scout join failed: {e}")
+        except Exception:
+            pass
+@client.on(events.NewMessage(pattern='/spider_test'))
+async def cmd_spider_test(event):
+    try:
+        if not event.is_private:
+            return
+        await event.reply("Running Spider discovery once...")
+        cnt = await spider_discover_once(max_keywords=2, max_links_per_kw=6)
+        await event.reply(f"Spider discovered {cnt} eligible targets in this quick run.")
+    except Exception as e:
+        try:
+            await event.reply(f"Spider test failed: {e}")
+        except Exception:
+            pass

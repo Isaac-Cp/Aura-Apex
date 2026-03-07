@@ -14,6 +14,9 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 
+VOLUME ["/app/data"]
+ENV DB_FILE="/app/data/gold_leads.db"
+
 EXPOSE 8080
 
-CMD ["python", "aura_apex_supreme.py"]
+CMD ["python", "main.py"]
