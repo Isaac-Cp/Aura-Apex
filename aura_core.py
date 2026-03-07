@@ -11,6 +11,8 @@ import sys
 import time
 import re
 import aiosqlite
+import sqlite3
+from config import DB_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +63,85 @@ def setup_logging(log_file: str = "bot.log", level: int = logging.INFO) -> Optio
 
 
 def load_json(path: str, default: Any) -> Any:
-    # Legacy sync support if needed, but prefer async
+    try:
+        name = os.path.basename(path or "")
+        if name == "source_kpis.json":
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("SELECT term, attempts, successes, errors FROM source_kpis")
+                rows = cur.fetchall()
+                con.close()
+                out = {}
+                for term, att, suc, err in rows:
+                    out[str(term or "")] = {"attempts": int(att or 0), "successes": int(suc or 0), "errors": int(err or 0)}
+                return out
+            except Exception:
+                return default
+        if name == "join_attempts.json":
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("SELECT id, title, status, reason, ts FROM join_attempts ORDER BY ts DESC LIMIT 1000")
+                rows = cur.fetchall()
+                con.close()
+                out = []
+                for i, t, s, r, ts in rows:
+                    out.append({"id": i or "", "title": t or "", "status": s or "", "reason": r or "", "ts": ts})
+                return out
+            except Exception:
+                return default
+        if name == "potential_targets.json":
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("SELECT link, title, members, source_group_id, discovered_at FROM potential_targets ORDER BY discovered_at DESC")
+                rows = cur.fetchall()
+                con.close()
+                out = []
+                for ln, tt, mm, sg, dt in rows:
+                    out.append({"link": ln or "", "title": tt or "", "members": int(mm or 0), "source_group_id": sg or "", "discovered_at": dt or ""})
+                return out
+            except Exception:
+                return default
+        if name == "cached_invites.json":
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("SELECT link, title, ts FROM cached_invites ORDER BY ts DESC")
+                rows = cur.fetchall()
+                con.close()
+                out = []
+                for ln, tt, ts in rows:
+                    out.append({"link": ln or "", "title": tt or "", "ts": ts})
+                return out
+            except Exception:
+                return default
+        if name == "entity_cache.json":
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("SELECT value FROM entity_cache")
+                rows = cur.fetchall()
+                con.close()
+                return [str(v[0]) for v in rows]
+            except Exception:
+                return default
+        if name == "resolve_cooldowns.json":
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("SELECT key, until_ts FROM resolve_cooldowns")
+                rows = cur.fetchall()
+                con.close()
+                out = {}
+                for k, u in rows:
+                    out[str(k or "")] = float(u or 0.0)
+                return out
+            except Exception:
+                return default
+    except Exception:
+        pass
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -79,6 +159,78 @@ async def load_json_async(path: str, default: Any) -> Any:
 
 def save_json(path: str, data: Any) -> None:
     try:
+        name = os.path.basename(path or "")
+        if name == "source_kpis.json" and isinstance(data, dict):
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                for term, rec in data.items():
+                    att = int((rec or {}).get("attempts", 0) or 0)
+                    suc = int((rec or {}).get("successes", 0) or 0)
+                    err = int((rec or {}).get("errors", 0) or 0)
+                    cur.execute("INSERT INTO source_kpis(term, attempts, successes, errors, updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(term) DO UPDATE SET attempts=?, successes=?, errors=?, updated_at=CURRENT_TIMESTAMP", (term, att, suc, err, att, suc, err))
+                con.commit()
+                con.close()
+                return
+            except Exception:
+                pass
+        if name == "join_attempts.json" and isinstance(data, list):
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                for it in data:
+                    cur.execute("INSERT INTO join_attempts(id, title, status, reason, ts) VALUES(?,?,?,?,?)", (str(it.get("id","")), str(it.get("title","")), str(it.get("status","")), str(it.get("reason","")), float(it.get("ts",0.0))))
+                con.commit()
+                con.close()
+                return
+            except Exception:
+                pass
+        if name == "potential_targets.json" and isinstance(data, list):
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("DELETE FROM potential_targets")
+                for it in data:
+                    cur.execute("INSERT OR REPLACE INTO potential_targets(link, title, members, source_group_id, discovered_at) VALUES(?,?,?,?,?)", (str(it.get("link","")), str(it.get("title","")), int(it.get("members",0) or 0), str(it.get("source_group_id","")), str(it.get("discovered_at",""))))
+                con.commit()
+                con.close()
+                return
+            except Exception:
+                pass
+        if name == "cached_invites.json" and isinstance(data, list):
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                for it in data:
+                    cur.execute("INSERT OR REPLACE INTO cached_invites(link, title, ts) VALUES(?,?,?)", (str(it.get("link","")), str(it.get("title","")), float(it.get("ts",0.0))))
+                con.commit()
+                con.close()
+                return
+            except Exception:
+                pass
+        if name == "entity_cache.json" and isinstance(data, list):
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("DELETE FROM entity_cache")
+                for v in data:
+                    cur.execute("INSERT OR IGNORE INTO entity_cache(value) VALUES(?)", (str(v),))
+                con.commit()
+                con.close()
+                return
+            except Exception:
+                pass
+        if name == "resolve_cooldowns.json" and isinstance(data, dict):
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                for k, u in data.items():
+                    cur.execute("INSERT OR REPLACE INTO resolve_cooldowns(key, until_ts) VALUES(?,?)", (str(k or ""), float(u or 0.0)))
+                con.commit()
+                con.close()
+                return
+            except Exception:
+                pass
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f)
     except Exception as e:

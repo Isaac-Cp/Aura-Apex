@@ -656,6 +656,33 @@ async def init_db():
                       ts DATETIME DEFAULT CURRENT_TIMESTAMP,
                       type TEXT,
                       details TEXT)''')
+            await conn.execute('''CREATE TABLE IF NOT EXISTS source_kpis
+                     (term TEXT PRIMARY KEY,
+                      attempts INTEGER DEFAULT 0,
+                      successes INTEGER DEFAULT 0,
+                      errors INTEGER DEFAULT 0,
+                      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            await conn.execute('''CREATE TABLE IF NOT EXISTS join_attempts
+                     (id TEXT,
+                      title TEXT,
+                      status TEXT,
+                      reason TEXT,
+                      ts REAL)''')
+            await conn.execute('''CREATE TABLE IF NOT EXISTS potential_targets
+                     (link TEXT PRIMARY KEY,
+                      title TEXT,
+                      members INTEGER,
+                      source_group_id TEXT,
+                      discovered_at DATETIME)''')
+            await conn.execute('''CREATE TABLE IF NOT EXISTS cached_invites
+                     (link TEXT PRIMARY KEY,
+                      title TEXT,
+                      ts REAL)''')
+            await conn.execute('''CREATE TABLE IF NOT EXISTS entity_cache
+                     (value TEXT PRIMARY KEY)''')
+            await conn.execute('''CREATE TABLE IF NOT EXISTS resolve_cooldowns
+                     (key TEXT PRIMARY KEY,
+                      until_ts REAL)''')
             try:
                 await conn.execute("PRAGMA journal_mode=WAL;")
                 await conn.execute("PRAGMA synchronous=NORMAL;")
