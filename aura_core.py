@@ -65,6 +65,44 @@ def setup_logging(log_file: str = "bot.log", level: int = logging.INFO) -> Optio
 def load_json(path: str, default: Any) -> Any:
     try:
         name = os.path.basename(path or "")
+        if name == "supreme_stats.json":
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("SELECT data FROM supreme_stats WHERE id=1")
+                row = cur.fetchone()
+                con.close()
+                if row and row[0]:
+                    return json.loads(row[0])
+                return default
+            except Exception:
+                return default
+        if name == "supreme_groups.json":
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("SELECT link FROM processed_groups")
+                rows = cur.fetchall()
+                con.close()
+                return [str(r[0]) for r in rows]
+            except Exception:
+                return default
+        if name == "prospect_catalog.json":
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("SELECT data FROM prospect_catalog")
+                rows = cur.fetchall()
+                con.close()
+                out = []
+                for (data_json,) in rows:
+                    try:
+                        out.append(json.loads(data_json))
+                    except Exception:
+                        continue
+                return out
+            except Exception:
+                return default
         if name == "source_kpis.json":
             try:
                 con = sqlite3.connect(DB_FILE)
@@ -140,6 +178,47 @@ def load_json(path: str, default: Any) -> Any:
                 return out
             except Exception:
                 return default
+        if name == "supreme_groups.json":
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("CREATE TABLE IF NOT EXISTS processed_groups (link TEXT PRIMARY KEY)")
+                cur.execute("SELECT link FROM processed_groups")
+                rows = cur.fetchall()
+                con.close()
+                return [str(v[0]) for v in rows]
+            except Exception:
+                return default
+        if name == "supreme_stats.json":
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)")
+                cur.execute("SELECT value FROM kv_store WHERE key='supreme_stats'")
+                row = cur.fetchone()
+                con.close()
+                if row and row[0]:
+                    return json.loads(row[0])
+                return default
+            except Exception:
+                return default
+        if name == "prospect_catalog.json":
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("CREATE TABLE IF NOT EXISTS prospect_catalog (url TEXT PRIMARY KEY, json TEXT)")
+                cur.execute("SELECT json FROM prospect_catalog")
+                rows = cur.fetchall()
+                con.close()
+                out = []
+                for (blob,) in rows:
+                    try:
+                        out.append(json.loads(blob))
+                    except Exception:
+                        continue
+                return out
+            except Exception:
+                return default
     except Exception:
         pass
     if os.path.exists(path):
@@ -160,6 +239,41 @@ async def load_json_async(path: str, default: Any) -> Any:
 def save_json(path: str, data: Any) -> None:
     try:
         name = os.path.basename(path or "")
+        if name == "supreme_stats.json" and isinstance(data, dict):
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("INSERT OR REPLACE INTO supreme_stats(id, data) VALUES(1, ?)", (json.dumps(data),))
+                con.commit()
+                con.close()
+                return
+            except Exception:
+                pass
+        if name == "supreme_groups.json" and isinstance(data, list):
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("DELETE FROM processed_groups")
+                for ln in data:
+                    if ln:
+                        cur.execute("INSERT OR IGNORE INTO processed_groups(link) VALUES(?)", (str(ln),))
+                con.commit()
+                con.close()
+                return
+            except Exception:
+                pass
+        if name == "prospect_catalog.json" and isinstance(data, list):
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("DELETE FROM prospect_catalog")
+                for rec in data:
+                    cur.execute("INSERT OR REPLACE INTO prospect_catalog(url, data) VALUES(?, ?)", (str(rec.get("url","")), json.dumps(rec)))
+                con.commit()
+                con.close()
+                return
+            except Exception:
+                pass
         if name == "source_kpis.json" and isinstance(data, dict):
             try:
                 con = sqlite3.connect(DB_FILE)
@@ -226,6 +340,46 @@ def save_json(path: str, data: Any) -> None:
                 cur = con.cursor()
                 for k, u in data.items():
                     cur.execute("INSERT OR REPLACE INTO resolve_cooldowns(key, until_ts) VALUES(?,?)", (str(k or ""), float(u or 0.0)))
+                con.commit()
+                con.close()
+                return
+            except Exception:
+                pass
+        if name == "supreme_groups.json" and isinstance(data, list):
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("CREATE TABLE IF NOT EXISTS processed_groups (link TEXT PRIMARY KEY)")
+                cur.execute("DELETE FROM processed_groups")
+                for ln in data:
+                    if ln:
+                        cur.execute("INSERT OR IGNORE INTO processed_groups(link) VALUES(?)", (str(ln),))
+                con.commit()
+                con.close()
+                return
+            except Exception:
+                pass
+        if name == "supreme_stats.json" and isinstance(data, dict):
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)")
+                cur.execute("INSERT OR REPLACE INTO kv_store(key, value) VALUES('supreme_stats', ?)", (json.dumps(data),))
+                con.commit()
+                con.close()
+                return
+            except Exception:
+                pass
+        if name == "prospect_catalog.json" and isinstance(data, list):
+            try:
+                con = sqlite3.connect(DB_FILE)
+                cur = con.cursor()
+                cur.execute("CREATE TABLE IF NOT EXISTS prospect_catalog (url TEXT PRIMARY KEY, json TEXT)")
+                cur.execute("DELETE FROM prospect_catalog")
+                for rec in data:
+                    url = str((rec or {}).get("url", ""))
+                    if url:
+                        cur.execute("INSERT OR REPLACE INTO prospect_catalog(url, json) VALUES(?, ?)", (url, json.dumps(rec)))
                 con.commit()
                 con.close()
                 return

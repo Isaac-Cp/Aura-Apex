@@ -91,15 +91,13 @@ else:
     logger.warning("GROQ_API_KEY missing.")
 
 SYSTEM_PROMPT = (
-    "You are 'Aiden', a helpful and technical member of an IPTV enthusiast community.\n"
-    "Your goal is to send a short, conversational Telegram DM to a lead.\n\n"
-    "STRICT RULES:\n"
-    "1. NO FORMAL GREETINGS: Use \"Hey\", \"Yo\", or \"Quick one\". Never \"Dear\" or \"Hello\".\n"
-    "2. NO SALES JARGON: Avoid \"innovative\", \"solution\", \"guarantee\", or \"best-in-class\".\n"
-    "3. BREVITY: Maximum 120 words. Use 3-5 short sentences.\n"
-    "4. TONE: Peer-to-peer, slightly informal. Use lowercase occasionally like a mobile user.\n"
-    "5. CONTEXT: Always reference the group and the specific problem they mentioned.\n"
-    "6. CTA: End with a low-pressure question, not a link."
+    "Identity: You are Aiden, a specialized streaming dev and white-label consultant.\n"
+    "Tone: Technical, peer-level, skeptical of cheap providers. Use 'lower case' for tech terms like 'dns' or 'vpn'.\n"
+    "Goal: Acknowledge their specific tech pain (buffering/isp throttling) and hint that custom-branded apps solve this via hardcoded DNS.\n"
+    "Rules:\n"
+    "1. Start with a peer-level observation (e.g., 'Firestick 4K Max? That buffer is usually an MTU issue').\n"
+    "2. Mention you move people to private nodes to stop ISP throttling.\n"
+    "3. No links. No sales pressure. One technical question to end."
 )
 
 OPENERS_HIGH = [
@@ -125,11 +123,10 @@ CTAS_LOW = [
 
 def _sanitize_dm(dm: str) -> str:
     dm = re.sub(r'(https?://\S+|t\.me/\S+)', '', dm)
-    dm = re.sub(r'[\u2600-\u27BF\U0001F300-\U0001FAFF]+', '', dm)
     dm = re.sub(r'\s+', ' ', dm).strip()
     words = dm.split()
-    if len(words) > 40:
-        dm = ' '.join(words[:40])
+    if len(words) > 50:
+        dm = ' '.join(words[:50])
     return dm
 
 def _fallback_dm(lead_name: str, group_name: str, user_msg: str, lead_score: int) -> str:
@@ -141,30 +138,49 @@ def _fallback_dm(lead_name: str, group_name: str, user_msg: str, lead_score: int
 async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_score: int, context_hint: str, style_hint: str) -> str:
     if not ai_client:
         return _fallback_dm(lead_name, group_name, user_msg, lead_score)
-    intent_focus = "focus on fixing their technical issue/buffering"
-    if lead_score >= 7:
-        intent_focus = "briefly mention our rebranding service only if relevant"
+    tech_trigger = ""
+    if "tivimate" in (user_msg or "").lower():
+        tech_trigger = "Mention TiviMate User-Agent settings."
+    if "firestick" in (user_msg or "").lower():
+        tech_trigger = "Mention Firestick cache and background limits."
+    intent_focus = "Help them fix the lag/buffering peer-to-peer."
+    if lead_score >= 8:
+        intent_focus = "Pivot the conversation toward why branded apps with hardcoded DNS are more stable than generic Smarters/XC apps."
     up = (
-        f"Lead Name: {lead_name}\n"
-        f"Group Found In: {group_name}\n"
-        f"What they said: \"{user_msg}\"\n"
-        f"Instruction: {intent_focus}. {style_hint}. {context_hint}. "
-        f"Reply in ≤40 words, no links, no emojis, one soft CTA."
+        f"Lead: {lead_name} (found in {group_name})\n"
+        f"Message: \"{user_msg}\"\n"
+        f"Tech Hook: {tech_trigger}\n"
+        f"Focus: {intent_focus} {style_hint}. {context_hint}\n"
+        f"Constraint: 3 sentences max. Lowercase tech terms. End with a question about their ISP or device."
     )
     try:
-        resp = await ai_client.chat.completions.create(
+        resp = await ai_client.chat_completions.create(  # fallback naming
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": up}
             ],
             model="llama-3.3-70b-versatile",
-            temperature=0.6,
-            max_tokens=64
+            temperature=0.8,
+            max_tokens=80
         )
         dm = (resp.choices[0].message.content or "").strip()
         return _sanitize_dm(dm)
-    except Exception:
-        return _fallback_dm(lead_name, group_name, user_msg, lead_score)
+    except Exception as e:
+        try:
+            resp = await ai_client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": up}
+                ],
+                model="llama-3.3-70b-versatile",
+                temperature=0.8,
+                max_tokens=80
+            )
+            dm = (resp.choices[0].message.content or "").strip()
+            return _sanitize_dm(dm)
+        except Exception:
+            logger.error("AI Gen Failed")
+            return _fallback_dm(lead_name, group_name, user_msg, lead_score)
 DM_ATTEMPTS_LOG = "dm_attempts.json"
 DM_COOLDOWN_HOURS = 48
 
@@ -3496,7 +3512,7 @@ async def build_prospect_catalog(limit=60, use_processed=True):
     items = []
     seen = set()
     sources_map = {}
-    if use_processed and os.path.exists(PROCESSED_GROUPS):
+    if use_processed:
         try:
             g = load_json(PROCESSED_GROUPS, [])
         except Exception:
@@ -3581,7 +3597,7 @@ async def build_prospect_catalog(limit=60, use_processed=True):
         save_json(PROSPECT_CATALOG_FILE, out)
     except Exception:
         pass
-    if not out and use_processed and os.path.exists(PROCESSED_GROUPS):
+    if not out and use_processed:
         try:
             groups = load_json(PROCESSED_GROUPS, [])
         except Exception:
@@ -3658,6 +3674,12 @@ async def main():
         try:
             asyncio.create_task(performance_monitor(duration_sec=2400))
             logger.info("Performance monitor (40m) started.")
+        except Exception as e:
+            logger.error(f"Failed to start performance monitor: {e}")
+    if (os.environ.get("RUN_PERF_SHORT") or "").strip() == "1":
+        try:
+            asyncio.create_task(performance_monitor(duration_sec=600))
+            logger.info("Performance monitor (10m) started.")
         except Exception as e:
             logger.error(f"Failed to start performance monitor: {e}")
     async def ensure_qc_group_joined():
