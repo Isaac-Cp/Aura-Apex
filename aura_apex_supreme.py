@@ -1202,8 +1202,10 @@ SELLER_NEGATIVE_KEYWORDS = ["reseller", "panel", "credits", "wholesale", "restre
 SELLER_NEGATIVE_KEYWORDS += ["recruitment", "become reseller", "opportunity", "earn", "profit", "white label panel", "partner program", "affiliate", "bulk", "marketing group", "dealer program", "franchise"]
 BLACKLIST_JOIN = ["spam", "crypto-pump", "adult"]
 DB_QUEUE = asyncio.Queue()
+_SELLER_SHIELD_TERMS = ["reseller", "panel", "credits", "wholesale", "restream", "source", "supplier", "official", "market", "b2b", "trade", "rivenditore", "distribuidor", "mayorista", "grossiste", "revendedor"]
+_SELLER_SHIELD_TERMS += ["recruitment", "become reseller", "opportunity", "earn", "profit", "white label panel", "partner program", "affiliate", "bulk", "marketing group", "dealer program", "franchise"]
+_SELLER_SHIELD_TERMS_SET = set(k.lower() for k in _SELLER_SHIELD_TERMS)
 _TITLE_TARGET_KEYWORDS_SET = set(k.lower() for k in TITLE_TARGET_KEYWORDS)
-_SELLER_SHIELD_TERMS_SET = set(k.lower() for k in SELLER_SHIELD_TERMS)
 _BLACKLIST_JOIN_SET = set(k.lower() for k in BLACKLIST_JOIN)
 _MARKETING_ADV_HIGH = {"dm me","dm for service","dm for price","pm for price","inbox for price","order now","place order","order","price","prices","pricing"}
 _MARKETING_ADV_MED = {"buy","sell","subscribe","subscription","offer","deal","affiliate","bulk","dealer","franchise","supplier","restream","panel","credits","wholesale"}
@@ -1393,6 +1395,11 @@ def _is_price_list(text):
     return (currency and numbers >= 3) or (price_words and numbers >= 3)
 async def _output_status(status_text):
     try:
+        # Avoid sending status messages to admin channel in production unless critical
+        if os.environ.get("AURA_MODE", "").lower() != "testing":
+            logger.info(f"STATUS LOG: {status_text}")
+            return
+            
         ch = (ADMIN_LEADS_CHANNEL_ID or "").strip()
         if ch:
             await client.send_message(int(ch), status_text)
@@ -1467,8 +1474,7 @@ def _frustrated_user(text):
     return False
 USER_BLACKLIST_STRINGS = [
     'owner', 'admin', 'service', 'reseller', 'panel', 'credits', 'restock', 'iptv_bot', 'support',
-    'provider', 'seller', 'sales', 'official', 'streams', 'tv', 'hosting', 'server', 'iptv',
-    'ott', 'vod', 'subscription', 'channels', 'broadcast', 'streaming', 'manager', 'direct'
+    'provider', 'seller', 'sales', 'official', 'hosting', 'server', 'manager', 'direct'
 ]
 def _user_entity_audit(user):
     try:
@@ -1536,7 +1542,7 @@ def evaluate_lead_message(text, user=None):
     if _frustrated_user(text):
         return "PROCEED"
     ms = marketing_sentiment_score(text)
-    if ms <= 20:
+    if ms <= 45: # Relaxed from 20 to 45
         return "PROCEED"
     return "REJECT"
 def _ack_line(snippet):
@@ -2856,7 +2862,8 @@ async def user_discovery_loop():
                      # Also add to processed groups to avoid loop
                      groups.append(ident)
                      await save_json_async(PROCESSED_GROUPS, groups)
-                     logger.info(f"🚫 [Gatekeeper] Skipped Seller Hub: {title}")
+                     if os.environ.get("AURA_MODE", "").lower() == "testing":
+                        logger.info(f"🚫 [Gatekeeper] Skipped Seller Hub: {title}")
                      continue
                 if not _title_buyer_hit(title):
                     # Skip low buyer-intent titles
@@ -3021,7 +3028,9 @@ async def handle_v21_logic(event):
             log_activity("inbound_dm", f"{user_id}:{event.raw_text[:140]}")
         if pre_count == 0:
             try:
-                await client.send_message('me', f"Lead replied. User: {user_id} | Msg: {event.raw_text[:140]}")
+                # Only send reply notification if not in testing or if it's a real lead
+                if os.environ.get("AURA_MODE", "").lower() != "testing":
+                    await client.send_message('me', f"Lead replied. User: {user_id} | Msg: {event.raw_text[:140]}")
             except Exception:
                 pass
         return
@@ -3098,13 +3107,11 @@ async def handle_v21_logic(event):
         elif s < 4 and event.sender_id not in watchlist: # Adjusted low score check
             watchlist[event.sender_id] = now + 300
         
-        # Potential Lead Handshake (Random selection)
-        # Threshold: 7 (was 12)
-        if (s >= 7 or any(val in text for val in TIER_1_INDICATORS)) and random.random() < 0.6:
+        # Potential Lead Handshake (Immediate Queue)
+        if (s >= 7 or any(val in text for val in TIER_1_INDICATORS)):
             try:
                 evy = evaluate_lead_message(event.raw_text or "", sender)
                 if evy == "REJECT":
-                    await _output_status("STATUS: REJECT")
                     return
             except Exception:
                 pass
@@ -3112,15 +3119,17 @@ async def handle_v21_logic(event):
             if user_id not in queued_handshakes and await should_queue_handshake(user_id):
                 group_title = getattr(event.chat, "title", "group")
                 ms = marketing_sentiment_score(event.raw_text or "")
-                if ms <= 20:
+                if ms <= 45: # More lenient threshold
                     queued_handshakes[user_id] = {
                         "msg_id": event.id,
                         "chat_id": event.chat_id,
-                        "due": time.time() + random.randint(600, 900),
+                        "due": time.time() + random.randint(300, 600), # 5-10m delay
                         "snippet": event.raw_text[:120],
                         "group_title": group_title
                     }
-                logger.info(f"Queued Handshake for {user_id} in 10-15m (Score: {s}).")
+                    logger.info(f"Queued Handshake for {user_id} in 5-10m (Score: {s}, Sentiment: {ms}).")
+                else:
+                    logger.info(f"Lead {user_id} skipped due to sentiment: {ms}")
         try:
             links = _extract_tme_links(event.raw_text or "")
             for ln in links:
@@ -3172,21 +3181,28 @@ async def handshake_processor():
                     chat_id = data["chat_id"]
                     snippet = data.get("snippet", "")
                     group_title = data.get("group_title", "the group")
+                    cached_username = data.get("username")
                     try:
-                        if should_outreach():
-                            await client(functions.messages.SendReactionRequest(
-                                peer=chat_id, msg_id=msg_id, reaction=[ReactionEmoji(emoticon='ðŸ‘')]
-                            ))
-                        logger.info(f"Heuristic Handshake: Reacted to {u} in {chat_id}")
+                        # Only react if it's a valid message ID (not 0 or None)
+                        if msg_id and should_outreach():
+                            try:
+                                await client(functions.messages.SendReactionRequest(
+                                    peer=chat_id, msg_id=msg_id, reaction=[types.ReactionEmoji(emoticon='👍')]
+                                ))
+                                logger.info(f"Heuristic Handshake: Reacted to {u} in {chat_id}")
+                            except Exception as e:
+                                logger.warning(f"Reaction failed (possibly invalid msg_id {msg_id}): {e}")
                     except Exception as e:
-                        logger.error(f"Handshake failed: {e}")
+                        logger.error(f"Handshake logic error: {e}")
 
                     try:
                         if await user_opted_out(u):
                             logger.info("Skipping DM (user opted out).")
                             continue
-                        if not market_hour_ok():
-                            logger.info("Skipping DM (outside human hours).")
+                        if not market_hour_ok() and os.environ.get("AURA_MODE", "").lower() != "testing":
+                            tz = _market_tzinfo()
+                            h = datetime.datetime.now(tz).hour
+                            logger.info(f"Skipping DM to {u} (Outside human hours: {h}:00 in {tz.key}).")
                             continue
                         stats = await load_json_async(STATS_FILE, apex_supreme_stats)
                         dm_today = stats.get("dm_initiated_today", 0)
@@ -3199,16 +3215,17 @@ async def handshake_processor():
                             continue
                         try:
                             fu = await client(GetFullUserRequest(u))
-                            uname = getattr(getattr(fu, "user", None), "username", None)
+                            user_obj = getattr(fu, "user", None)
+                            uname = getattr(user_obj, "username", None) or cached_username
                             if not uname:
-                                logger.info("Skipping DM (no username).")
+                                logger.info(f"Skipping DM to {u} (no username).")
                                 continue
-                            lead_premium = bool(getattr(getattr(fu, "user", None), "premium", False))
+                            lead_premium = bool(getattr(user_obj, "premium", False))
                         except (UserPrivacyRestrictedError, PeerIdInvalidError):
                             logger.info("Skipping DM (privacy or invalid peer).")
                             continue
                         if not quality_gate(fu):
-                            logger.info("Skipping DM (failed quality gate).")
+                            logger.info(f"Skipping DM to {u} (Failed Quality Gate: No photo or long offline).")
                             continue
                         social_hint = ""
                         try:
@@ -3271,6 +3288,11 @@ async def handshake_processor():
                         try:
                             if outreach_blocked():
                                 logger.info("Skipping DM (STOP_OUTREACH enabled).")
+                                continue
+                            if not market_hour_ok():
+                                tz = _market_tzinfo()
+                                h = datetime.datetime.now(tz).hour
+                                logger.info(f"Skipping DM to {u} (Outside human hours: {h}:00 in {tz.key}).")
                                 continue
                             await client.send_read_acknowledge(u)
                             await asyncio.sleep(random.randint(300, 420))
@@ -3961,12 +3983,15 @@ async def main():
         delay = 5
         for _ in range(retries):
             try:
+                # Ensure we are not already connected
+                if client.is_connected():
+                    await client.disconnect()
+                
                 if SESSION_STRING:
                     await client.connect()
                     auth_ok = await client.is_user_authorized()
                     if not auth_ok:
                         raise RuntimeError("Session string not authorized. Regenerate SESSION_STRING with session_gen.py.")
-                    # Already authorized; no code callback needed
                 else:
                     await client.start(phone=PHONE_NUMBER, code_callback=_code_callback, password=os.environ.get("TELEGRAM_PASSWORD"))
                 return
@@ -3975,12 +4000,9 @@ async def main():
                     await asyncio.sleep(delay)
                     continue
                 logger.error(f"Connection Error: {_e}")
-                raise
-        await asyncio.sleep(delay)
-        if SESSION_STRING:
-            await client.start()
-        else:
-            await client.start(phone=PHONE_NUMBER, code_callback=_code_callback, password=os.environ.get("TELEGRAM_PASSWORD"))
+                if _ == retries - 1:
+                    raise
+                await asyncio.sleep(delay)
 
     if os.environ.get("RUN_SPIDER_TEST") == "1" and os.environ.get("SPIDER_TEST_NO_TELEGRAM") == "1":
         logger.info("Running Spider Module test (HTTP-only, no Telegram peek)...")
@@ -4036,9 +4058,9 @@ async def main():
         return
     asyncio.create_task(user_discovery_loop())
     asyncio.create_task(stats_report())
-    if qc_ok:
-        asyncio.create_task(handshake_processor())
-        asyncio.create_task(historical_scan_loop())
+    # Start outreach tasks regardless of QC group status (2026 Resilience Fix)
+    asyncio.create_task(handshake_processor())
+    asyncio.create_task(historical_scan_loop())
     asyncio.create_task(proxy_health_monitor(client, PROXY_FILE))
     asyncio.create_task(noise_generation_loop())
     asyncio.create_task(prune_dead_chats_loop())

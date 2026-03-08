@@ -415,7 +415,7 @@ async def get_pro_tip_for_topic(topic: str) -> str:
         
         # Strip any existing labels/emojis/formatting to normalize
         # This removes variations of "Aiden's Pro-Tip", emojis, and asterisks from the start
-        clean_tip = re.sub(r'^[\s\*💡]*(?:Aiden[\'’]s\s+)?Pro-Tip:[\s\*💡]*', '', tip, flags=re.IGNORECASE).strip()
+        clean_tip = re.sub(r'^[\s\*💡]*(?:Aiden[\'’]s\s+)?Pro-Tip:[\s\*💡]*', '', tip, flags=re.I).strip()
         
         # Re-apply the canonical label
         tip = f"***💡 Aiden’s Pro-Tip:*** {clean_tip}"
@@ -2012,20 +2012,21 @@ async def curator_loop():
                     tasks = [ _run_source(name, func) for name, func in sources ]
                     results = await asyncio.gather(*tasks, return_exceptions=False)
                     
-                    new_items = []
+                    results_flat = []
                     for arr in results:
                         if arr:
-                            new_items.extend(arr)
-                            
+                            results_flat.extend(arr)
+                    
                     # Dedup
                     filtered = []
-                    for t, l, s in new_items:
+                    for t, l, s in results_flat:
                         try:
                             if _is_duplicate(t, l, 0.90):
                                 continue
                         except Exception:
                             pass
                         filtered.append((t, l, s))
+                    
                     new_items = filtered
                     
                     # Sort high value first
@@ -2041,25 +2042,16 @@ async def curator_loop():
                             continue
                             
                         # Topic Classification
-                        # We rewrite headline first to get accurate topic
-                        # But wait, rewriting is async and costly. Maybe classify raw title first?
-                        # classify_topic is local regex.
-                        
                         raw_topic_info = classify_topic(title)
                         is_update = "update" in raw_topic_info["topic"] or "release" in title.lower() or "patch" in title.lower()
                         
                         if not testing_mode:
-                            # If it's an update, allowed anytime
                             if is_update:
                                 pass 
                             elif target_topic:
-                                # If we are in a window, ONLY allow that topic
-                                # But raw classification might be "news" for a guide.
-                                # Let's trust the classification.
                                 if raw_topic_info["topic"] != target_topic:
                                     continue
                             else:
-                                # Outside windows, and not an update -> Skip
                                 continue
                         
                         # Post it
@@ -2067,13 +2059,14 @@ async def curator_loop():
                         if ok:
                             today_count += 1
                             global_count += 1
+                            append_local_link(link) # Add this to persist links for sentinel
                             
-        # Soft Sale Logic
-        # We also dedup soft sales by content type
-        header = "**🛠️ #AuraFix | Skip Manual Fixes with Hardcoding**"
-        if not _is_duplicate(header, "", 0.90):
-            await maybe_post_soft_sale(client, channel_id, today_count, global_count)
-                
+                # Soft Sale Logic
+                # We also dedup soft sales by content type
+                header = "**🛠️ #AuraFix | Skip Manual Fixes with Hardcoding**"
+                if not _is_duplicate(header, "", 0.90):
+                    await maybe_post_soft_sale(client, channel_id, today_count, global_count)
+                            
                 # Daily Audit
                 await maybe_send_daily_audit(client)
                 
