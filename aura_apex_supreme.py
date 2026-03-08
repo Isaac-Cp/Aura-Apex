@@ -1,20 +1,20 @@
 from typing import Optional, List, Dict, Any, Union, Tuple
 import asyncio
 import logging
-import logging.handlers
 import random
 import sys
 import datetime
 import os
 import re
 import time
-import hashlib
+import zlib
 import urllib.parse
 import ssl
 import certifi
 import aiohttp
 from bs4 import BeautifulSoup
 import aiosqlite
+from zoneinfo import ZoneInfo
 
 from telethon import TelegramClient, events, functions
 from telethon.sessions import StringSession
@@ -58,6 +58,13 @@ from config import SESSION_STRING as CONFIG_SESSION_STRING
 # Logging Setup
 setup_logging()
 logger = logging.getLogger(__name__)
+try:
+    import sentry_sdk
+    _SENTRY_DSN = (os.environ.get("SENTRY_DSN") or "").strip()
+    if _SENTRY_DSN:
+        sentry_sdk.init(dsn=_SENTRY_DSN, traces_sample_rate=float(os.environ.get("SENTRY_TRACES", "0.0") or 0.0))
+except Exception:
+    pass
 
 def validate_startup_secrets():
     errs = []
@@ -89,6 +96,17 @@ if GROQ_API_KEY:
         logger.error(f"Groq Init Error: {e}")
 else:
     logger.warning("GROQ_API_KEY missing.")
+_AI_DM_MAX_PER_MIN = int(os.environ.get("APEX_AI_MAX_PER_MIN", "12"))
+_ai_dm_ts: List[float] = []
+def _ai_dm_allow():
+    now = time.time()
+    cutoff = now - 60.0
+    global _ai_dm_ts
+    _ai_dm_ts = [t for t in _ai_dm_ts if t >= cutoff]
+    if len(_ai_dm_ts) < _AI_DM_MAX_PER_MIN:
+        _ai_dm_ts.append(now)
+        return True
+    return False
 
 SYSTEM_PROMPT = (
     "Identity: You are Aiden, a specialized streaming dev and white-label consultant.\n"
@@ -122,21 +140,32 @@ CTAS_LOW = [
 ]
 
 def _sanitize_dm(dm: str) -> str:
-    dm = re.sub(r'(https?://\S+|t\.me/\S+)', '', dm)
-    dm = re.sub(r'\s+', ' ', dm).strip()
+    dm = re.sub(r'(https?://\S+|t\s?\.\s?me/\S+)', '', dm, flags=re.IGNORECASE)
+    dm = dm.replace("!", ".").replace("...", "..")
     words = dm.split()
-    if len(words) > 50:
-        dm = ' '.join(words[:50])
-    return dm
+    if len(words) > 35:
+        dm = ' '.join(words[:35]) + ".."
+    return dm.strip().lower()
 
+def _spin(text: str) -> str:
+    out = text
+    pattern = re.compile(r'\{([^{}]+)\}')
+    while True:
+        m = pattern.search(out)
+        if not m:
+            break
+        choices = m.group(1).split('|')
+        rep = random.choice(choices).strip()
+        out = out[:m.start()] + rep + out[m.end():]
+    return out
 def _fallback_dm(lead_name: str, group_name: str, user_msg: str, lead_score: int) -> str:
-    opener = random.choice(OPENERS_HIGH if lead_score >= 7 else OPENERS_LOW).format(group=group_name)
-    cta = random.choice(CTAS_HIGH if lead_score >= 7 else CTAS_LOW)
-    base = f"{opener} {lead_name}, looks like you’re dealing with that. {cta}"
-    return _sanitize_dm(base)
+    base = "{Hey|Yo|Quick one}, saw your post in " + str(group_name) + ". {Want a quick tip?|Want a tiny checklist?|Can I send a tiny fix plan?}"
+    return _sanitize_dm(_spin(base))
 
-async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_score: int, context_hint: str, style_hint: str) -> str:
+async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_score: int, context_hint: str, style_hint: str, stealth: bool = False) -> str:
     if not ai_client:
+        return _fallback_dm(lead_name, group_name, user_msg, lead_score)
+    if not _ai_dm_allow():
         return _fallback_dm(lead_name, group_name, user_msg, lead_score)
     tech_trigger = ""
     if "tivimate" in (user_msg or "").lower():
@@ -146,6 +175,9 @@ async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_sc
     intent_focus = "Help them fix the lag/buffering peer-to-peer."
     if lead_score >= 8:
         intent_focus = "Pivot the conversation toward why branded apps with hardcoded DNS are more stable than generic Smarters/XC apps."
+    local_prompt = SYSTEM_PROMPT
+    if stealth:
+        local_prompt += "\nStealth mode: avoid any commercial wording; sound like a peer sharing a fix."
     up = (
         f"Lead: {lead_name} (found in {group_name})\n"
         f"Message: \"{user_msg}\"\n"
@@ -154,9 +186,9 @@ async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_sc
         f"Constraint: 3 sentences max. Lowercase tech terms. End with a question about their ISP or device."
     )
     try:
-        resp = await ai_client.chat_completions.create(  # fallback naming
+        resp = await ai_client.chat.completions.create(
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": local_prompt},
                 {"role": "user", "content": up}
             ],
             model="llama-3.3-70b-versatile",
@@ -169,7 +201,7 @@ async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_sc
         try:
             resp = await ai_client.chat.completions.create(
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": local_prompt},
                     {"role": "user", "content": up}
                 ],
                 model="llama-3.3-70b-versatile",
@@ -179,8 +211,25 @@ async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_sc
             dm = (resp.choices[0].message.content or "").strip()
             return _sanitize_dm(dm)
         except Exception:
-            logger.error("AI Gen Failed")
-            return _fallback_dm(lead_name, group_name, user_msg, lead_score)
+            try:
+                key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+                if key:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
+                    payload = {"contents":[{"parts":[{"text": local_prompt + "\n\n" + up}]}]}
+                    async with aiohttp.ClientSession() as sess:
+                        async with sess.post(url, json=payload, timeout=20) as r:
+                            if r.status == 200:
+                                data = await r.json()
+                                text = ""
+                                try:
+                                    text = data["candidates"][0]["content"]["parts"][0]["text"]
+                                except Exception:
+                                    text = ""
+                                if text:
+                                    return _sanitize_dm(text)
+            except Exception:
+                pass
+            return _sanitize_dm(_fallback_dm(lead_name, group_name, user_msg, lead_score))
 DM_ATTEMPTS_LOG = "dm_attempts.json"
 DM_COOLDOWN_HOURS = 48
 
@@ -193,32 +242,24 @@ def _market_tzinfo():
     try:
         m = (MARKET or "").lower()
         if m in ("en-us", "us", "usa"):
-            return datetime.timezone(datetime.timedelta(hours=-5))
+            return ZoneInfo("America/New_York")
         if m in ("en-uk", "uk", "gb"):
-            return datetime.timezone(datetime.timedelta(hours=0))
-        if m in ("en-eu", "eu"):
-            return datetime.timezone(datetime.timedelta(hours=1))
+            return ZoneInfo("Europe/London")
+        if m in ("en-eu", "eu", "de-de", "fr-fr", "it-it", "es-es"):
+            return ZoneInfo("Europe/Berlin")
         if m in ("es-es", "es", "spain"):
-            return datetime.timezone(datetime.timedelta(hours=1))
+            return ZoneInfo("Europe/Madrid")
         if m in ("it-it", "it", "italy"):
-            return datetime.timezone(datetime.timedelta(hours=1))
-        return None
+            return ZoneInfo("Europe/Rome")
+        return ZoneInfo("UTC")
     except Exception as e:
         logger.debug(f"Timezone info error: {e}")
-        return None
+        return ZoneInfo("UTC")
 
 def _normalize_key(uid: str, text: str) -> str:
     text = re.sub(r'\s+', ' ', (text or '')).strip().lower()
-    return hashlib.sha1(f"{uid}:{text}".encode("utf-8")).hexdigest()
-
-def _load_dm_log() -> list:
-    # Use sync load for initialization if needed, but this function seems to be called in async context
-    # However, safe_send_dm is async, so we should convert this to async if possible.
-    # For now, let's keep it sync here but use async in safe_send_dm
-    try:
-        return load_json(DM_ATTEMPTS_LOG, [])
-    except Exception:
-        return []
+    val = zlib.adler32(f"{uid}:{text}".encode("utf-8")) & 0xffffffff
+    return str(val)
 
 async def _load_dm_log_async() -> list:
     try:
@@ -244,6 +285,21 @@ async def safe_send_dm(client: Any, peer: Any, message: str, tzinfo: Any = None)
     uid = str(getattr(peer, "user_id", getattr(peer, "id", peer)))
     if not uid:
         return False
+    # Peer-based limit: avoid multiple DMs to same user in a short window
+    try:
+        if not _dm_peer_limiter_allow(uid, max_per_hour=2):
+            logs.append({"ts": _now_ts(), "peer_id": uid, "status": "skipped", "reason": "peer_limit"})
+            await _save_dm_log_async(logs)
+            return False
+    except Exception:
+        pass
+    try:
+        if outreach_deep_sleep():
+            logs.append({"ts": _now_ts(), "peer_id": uid, "status": "skipped", "reason": "deep_sleep"})
+            await _save_dm_log_async(logs)
+            return False
+    except Exception:
+        pass
     if _recent_dm_block(logs, uid):
         logs.append({"ts": _now_ts(), "peer_id": uid, "status": "skipped", "reason": "cooldown"})
         await _save_dm_log_async(logs)
@@ -265,10 +321,16 @@ async def safe_send_dm(client: Any, peer: Any, message: str, tzinfo: Any = None)
         await _save_dm_log_async(logs)
         return False
     try:
-        await client.send_chat_action(peer, 'typing')
+        est = max(2.0, min(12.0, len(message) * 0.05))
+        start = time.time()
+        while (time.time() - start) < est:
+            try:
+                await client.send_chat_action(peer, 'typing')
+            except Exception:
+                break
+            await asyncio.sleep(2.0)
     except Exception as e:
-        logger.debug(f"Failed to send typing action: {e}")
-    await asyncio.sleep(random.uniform(1.2, 2.6))
+        logger.debug(f"Typing variation error: {e}")
     tries = 0
     while tries < 2:
         try:
@@ -280,6 +342,14 @@ async def safe_send_dm(client: Any, peer: Any, message: str, tzinfo: Any = None)
             logs.append({"ts": _now_ts(), "peer_id": uid, "status": "floodwait", "reason": int(getattr(e, "seconds", 60))})
             await _save_dm_log_async(logs)
             return False
+        except PeerFloodError:
+            try:
+                activate_deep_sleep(12 * 3600)
+                logs.append({"ts": _now_ts(), "peer_id": uid, "status": "error", "reason": "peer_flood_deep_sleep"})
+                await _save_dm_log_async(logs)
+            except Exception:
+                pass
+            return False
         except ChatWriteForbiddenError:
             logs.append({"ts": _now_ts(), "peer_id": uid, "status": "error", "reason": "forbidden"})
             await _save_dm_log_async(logs)
@@ -287,7 +357,9 @@ async def safe_send_dm(client: Any, peer: Any, message: str, tzinfo: Any = None)
         except Exception as e:
             logger.warning(f"Failed to send DM (try {tries+1}): {e}")
             tries += 1
-            await asyncio.sleep(1.0 + tries * 1.0)
+            import random as _r
+            backoff = min(30.0, (2 ** tries)) + _r.uniform(0, 0.5)
+            await asyncio.sleep(backoff)
     logs.append({"ts": _now_ts(), "peer_id": uid, "status": "error", "reason": "retry_exhausted"})
     await _save_dm_log_async(logs)
     return False
@@ -315,29 +387,39 @@ MARKET = os.environ.get("MARKET", "").lower()
 ENTITY_CACHE_FILE = 'entity_cache.json'
 CANDIDATE_QUEUE_FILE = 'candidate_queue.json'
 RESOLVE_COOLDOWN_FILE = 'resolve_cooldowns.json'
-class _RateLimiter:
-    def __init__(self, tokens, interval):
-        self.tokens = tokens
-        self.max_tokens = tokens
-        self.interval = interval
-        self.last_refill = time.time()
-    def _refill(self):
-        now = time.time()
-        if now - self.last_refill >= self.interval:
-            self.tokens = self.max_tokens
-            self.last_refill = now
+class _SlidingWindowLimiter:
+    def __init__(self, max_actions, window_sec):
+        self.max_actions = max_actions
+        self.window = window_sec
+        self.events = []
     async def consume(self):
-        self._refill()
-        if self.tokens > 0:
-            self.tokens -= 1
+        now = time.time()
+        cutoff = now - self.window
+        self.events = [t for t in self.events if t >= cutoff]
+        if len(self.events) < self.max_actions:
+            self.events.append(now)
             return True
         return False
-resolve_limiter = _RateLimiter(RESOLVE_RATE_TOKENS, RESOLVE_RATE_INTERVAL)
-join_limiter = _RateLimiter(JOIN_RATE_TOKENS, JOIN_RATE_INTERVAL)
+resolve_limiter = _SlidingWindowLimiter(RESOLVE_RATE_TOKENS, RESOLVE_RATE_INTERVAL)
+join_limiter = _SlidingWindowLimiter(JOIN_RATE_TOKENS, JOIN_RATE_INTERVAL)
 async def resolve_limiter_consume():
     return await resolve_limiter.consume()
 async def join_limiter_consume():
     return await join_limiter.consume()
+
+# Peer-based DM limiter to avoid rapid messages to the same user
+_DM_PEER_LIMITS: Dict[str, list] = {}
+def _dm_peer_limiter_allow(peer_id: str, max_per_hour: int = 2) -> bool:
+    now = time.time()
+    cutoff = now - 3600
+    arr = _DM_PEER_LIMITS.get(peer_id, [])
+    arr = [t for t in arr if t >= cutoff]
+    if len(arr) < max_per_hour:
+        arr.append(now)
+        _DM_PEER_LIMITS[peer_id] = arr
+        return True
+    _DM_PEER_LIMITS[peer_id] = arr
+    return False
 async def ensure_connected():
     global _last_conn_check_ts, _last_conn_status
     now = time.time()
@@ -608,13 +690,6 @@ try:
 except Exception as e:
     logger.debug(f"UserAgent init failed: {e}")
     ua = None
-UA_LIST = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
-]
 request_counter = 0
 
 def get_ghost_ua():
@@ -622,7 +697,7 @@ def get_ghost_ua():
     request_counter += 1
     if ua:
         return ua.random if request_counter % 5 == 0 else ua.chrome
-    return random.choice(UA_LIST)
+    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
 async def init_db():
     try:
@@ -699,11 +774,42 @@ async def init_db():
             await conn.execute('''CREATE TABLE IF NOT EXISTS resolve_cooldowns
                      (key TEXT PRIMARY KEY,
                       until_ts REAL)''')
+            await conn.execute('''CREATE TABLE IF NOT EXISTS processed_groups
+                     (link TEXT PRIMARY KEY)''')
+            await conn.execute('''CREATE TABLE IF NOT EXISTS supreme_stats
+                     (id INTEGER PRIMARY KEY, 
+                      data TEXT)''')
+            await conn.execute('''CREATE TABLE IF NOT EXISTS kv_store
+                     (key TEXT PRIMARY KEY, 
+                      value TEXT)''')
+            await conn.execute('''CREATE TABLE IF NOT EXISTS prospect_catalog
+                     (url TEXT PRIMARY KEY, 
+                      json TEXT)''')
             try:
                 await conn.execute("PRAGMA journal_mode=WAL;")
                 await conn.execute("PRAGMA synchronous=NORMAL;")
             except Exception as e:
                 logger.debug(f"DB Pragma Error: {e}")
+            try:
+                await conn.execute("INSERT OR IGNORE INTO kv_store(key, value) VALUES('schema_version', '1')")
+            except Exception as e:
+                logger.debug(f"Schema version init error: {e}")
+            try:
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_prospects_user ON prospects(user_id)")
+            except Exception as e:
+                logger.debug(f"Index create error: {e}")
+            try:
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_prospects_group ON prospects(group_id)")
+            except Exception as e:
+                logger.debug(f"Index create error: {e}")
+            try:
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_joined_groups_gid ON joined_groups(group_id)")
+            except Exception as e:
+                logger.debug(f"Index create error: {e}")
+            try:
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_ts ON activity_log(ts)")
+            except Exception as e:
+                logger.debug(f"Index create error: {e}")
             await conn.commit()
     except Exception as e:
         logger.error(f"Database Init Error: {e}")
@@ -984,19 +1090,12 @@ def translate_text(text, target_lang):
         return text
 
 def market_hour_ok():
-    mk = (os.environ.get("MARKET") or "").lower()
-    offsets = {
-        "en-uk": 0,
-        "en-us": -5,
-        "es-es": 1,
-        "it-it": 1,
-        "de-de": 1,
-        "fr-fr": 1
-    }
-    off = offsets.get(mk, 0)
-    now_utc = datetime.datetime.utcnow()
-    h = (now_utc + datetime.timedelta(hours=off)).hour
-    return 9 <= h <= 21
+    try:
+        tz = _market_tzinfo()
+        h = datetime.datetime.now(tz).hour
+        return 9 <= h <= 21
+    except Exception:
+        return True
 
 def ensure_spintax_variation(text, last_text=None):
     try:
@@ -1099,26 +1198,6 @@ except Exception:
 LEADS_JSON = 'leads.json'
 KEYWORD_TRIGGERS = ["buffer", "rebrand", "dns help", "provider down", "looking for fix"]
 TITLE_TARGET_KEYWORDS = ["fix", "iptv", "help", "setup"]
-BUYER_INTENT_KEYWORDS = [
-    "Firestick troubleshooting",
-    "TiviMate premium help",
-    "TiviMate support",
-    "IPTV community",
-    "IPTV discussion",
-    "Android TV help",
-    "Nvidia Shield support",
-    "Cord cutting chat",
-    "Streaming problems fix",
-    "Smart TV setup guide",
-    "Smarters player help",
-    "IBO Player support",
-    "Televizo chat",
-    "Formuler box help",
-    "BuzzTV support",
-    "IPTV buffering fix",
-    "VPN for streaming",
-    "Tech support group"
-]
 SELLER_NEGATIVE_KEYWORDS = ["reseller", "panel", "credits", "wholesale", "restream", "source", "supplier", "official", "market", "b2b", "trade", "rivenditore", "distribuidor", "mayorista", "grossiste", "revendedor"]
 SELLER_NEGATIVE_KEYWORDS += ["recruitment", "become reseller", "opportunity", "earn", "profit", "white label panel", "partner program", "affiliate", "bulk", "marketing group", "dealer program", "franchise"]
 BLACKLIST_JOIN = ["spam", "crypto-pump", "adult"]
@@ -1147,14 +1226,33 @@ async def db_writer_loop():
         except Exception as e:
             logger.debug(f"DB Pragma Error (writer): {e}")
         await conn.commit()
+        batch = []
+        last_flush = time.time()
         while True:
             try:
-                sql, params = await DB_QUEUE.get()
+                timeout = max(0.0, 30.0 - (time.time() - last_flush))
                 try:
-                    await conn.execute(sql, params or [])
-                    await conn.commit()
-                except Exception as e:
-                    logger.debug(f"DB Write Error: {e} SQL: {sql}")
+                    item = await asyncio.wait_for(DB_QUEUE.get(), timeout=timeout if batch else None)
+                    batch.append(item)
+                except asyncio.TimeoutError:
+                    pass
+                if batch and ((time.time() - last_flush) >= 30.0 or len(batch) >= 100):
+                    try:
+                        await conn.execute("BEGIN")
+                        for sql, params in batch:
+                            try:
+                                await conn.execute(sql, params or [])
+                            except Exception as e:
+                                logger.debug(f"DB Write Error: {e} SQL: {sql}")
+                        await conn.commit()
+                    except Exception as e:
+                        logger.debug(f"DB Batch Commit Error: {e}")
+                        try:
+                            await conn.rollback()
+                        except Exception:
+                            pass
+                    batch = []
+                    last_flush = time.time()
             except Exception as e:
                 logger.debug(f"DB Queue Error: {e}")
                 await asyncio.sleep(1)
@@ -1281,7 +1379,7 @@ def intent_score(text):
     return score
 def _extract_tme_links(text):
     try:
-        return re.findall(r'https?://t\\.me/(?:joinchat/\\w+|\\+\\w+|[A-Za-z0-9_]+)', text or "", flags=re.IGNORECASE)
+        return re.findall(r'https?://t\.me/(?:joinchat/\w+|\+\w+|[A-Za-z0-9_]+)', text or "", flags=re.IGNORECASE)
     except Exception as e:
         logger.debug(f"Link extraction error: {e}")
         return []
@@ -1318,22 +1416,60 @@ def _provider_advertising(text):
         "dm for service", "dm for price", "pm for price", "inbox for price", "contact me",
         "reseller", "panel", "credits", "wholesale", "supplier", "restream", "official replacement",
         "price list", "price-list", "buy credits", "sell credits", "become reseller", "dashboard",
-        "affiliate", "bulk", "dealer program", "franchise"
+        "affiliate", "bulk", "dealer program", "franchise",
+        "free trial", "free test", "test available", "all channels", "premium iptv", "stable service",
+        "no buffering service", "m3u list", "bouquet", "live tv", "vod included", "full access",
+        "best iptv", "reliable service", "whatsapp me", "join my channel"
     ]
+    
+    # Check for channel lists (e.g., "UK, US, CA, DE") which is a strong seller signal
+    import re as _re
+    if len(_re.findall(r'\b(uk|us|usa|ca|de|fr|it|es|in|au)\b', t)) >= 3:
+        return True
+        
     bot_link = ("t.me/" in t and "bot" in t) or "/start" in t
     return any(k in t for k in adv_terms) or _is_price_list(t) or bot_link
 def _frustrated_user(text):
     t = (text or "").lower()
     if not t:
         return False
-    signals = [
+        
+    # Technical terms related to IPTV
+    tech_terms = [
         "buffer", "lag", "stutter", "freeze", "frame drop", "down", "not working",
         "quality", "looping", "crash", "error", "no audio", "audio desync",
         "blocked", "isp", "mtu", "packet loss", "bitrate", "hevc", "h265", "firestick",
         "tivimate", "smarters", "ibo", "xciptv", "televizo", "mag", "stb", "portal"
     ]
-    return any(k in t for k in signals)
-USER_BLACKLIST_STRINGS = ['owner', 'admin', 'service', 'reseller', 'panel', 'credits', 'restock', 'iptv_bot', 'support']
+    
+    # Help-seeking or frustration signals
+    frustration_signals = [
+        "help", "anyone else", "having issues", "problem", "broken", "stop", "sick of",
+        "how to fix", "advice", "suggestion", "why is", "cant get", "fail", "failed",
+        "question", "can i", "how do i", "trouble"
+    ]
+    
+    # A user is likely a lead if they mention a tech term AND show help-seeking intent
+    has_tech = any(k in t for k in tech_terms)
+    has_frustration = any(k in t for k in frustration_signals)
+    
+    if has_tech and has_frustration:
+        return True
+        
+    # Strong, standalone signals of a user needing help
+    strong_signals = [
+        "keeps buffering", "not working", "service down", "black screen", "login failed",
+        "buffer every", "channel down", "help me fix", "portal error", "m3u not loading"
+    ]
+    if any(k in t for k in strong_signals):
+        return True
+        
+    return False
+USER_BLACKLIST_STRINGS = [
+    'owner', 'admin', 'service', 'reseller', 'panel', 'credits', 'restock', 'iptv_bot', 'support',
+    'provider', 'seller', 'sales', 'official', 'streams', 'tv', 'hosting', 'server', 'iptv',
+    'ott', 'vod', 'subscription', 'channels', 'broadcast', 'streaming', 'manager', 'direct'
+]
 def _user_entity_audit(user):
     try:
         uname = None
@@ -1345,17 +1481,28 @@ def _user_entity_audit(user):
         except Exception:
             uname = None
         try:
-            bio = getattr(user, "about", None) or getattr(getattr(user, "full_user", None), "about", None)
+            # FullUser about field
+            bio = getattr(user, "about", None)
+            if not bio and hasattr(user, "full_user"):
+                bio = getattr(user.full_user, "about", None)
         except Exception:
             bio = None
+            
         u = (uname or "").lower()
         b = (bio or "").lower()
+        
+        # Check for provider signals in username or bio
         if any(k in u for k in USER_BLACKLIST_STRINGS):
             return True
         if any(k in b for k in USER_BLACKLIST_STRINGS):
             return True
-        if u.endswith("_iptv") or u.endswith("_bot"):
+            
+        # Common provider naming patterns
+        if u.endswith("_iptv") or u.endswith("_bot") or u.startswith("iptv_"):
             return True
+        if "t.me/" in b: # Providers often link to their channels/bots in bio
+            return True
+            
         return False
     except Exception:
         return False
@@ -1421,38 +1568,40 @@ def _detect_tech_context(snippet):
     if "smarters" in t or "xciptv" in t:
         return "smarters"
     return None
-def compose_aiden_dm(snippet, group_title, tech_context=None):
-    a = _ack_line(snippet)
-    ctx = tech_context or _detect_tech_context(snippet) or ""
-    hook = ""
-    try:
-        if ctx in TECH_TO_PAIN:
-            ref = random.choice(TECH_TO_PAIN[ctx])
-            hook = f"{ref} tends to be the hidden culprit."
-    except Exception:
-        hook = ""
-    team_line = ""
-    try:
-        gt = (group_title or "").lower()
-        if "lakers" in gt:
-            team_line = "Caught the Lakers game last night? The 4th‑quarter lag is exactly why I moved to a private node setup."
-        elif "man city" in gt or "mcfc" in gt:
-            team_line = "Saw the Man City match? That late‑game buffering is why I moved to a private node setup."
-        elif "ufc" in gt:
-            team_line = "Watched the UFC card? Those spikes mid‑round are why I moved to a private node setup."
-        elif "f1" in gt or "formula 1" in gt:
-            team_line = "Caught the F1 race? That sector‑split jitter is why I moved to a private node setup."
-    except Exception:
-        team_line = ""
-    b = "I moved to a Private Node tuned for 18–25Mbps Bitrate with HEVC."
-    c = "I rebranded the app and hardcoded DNS to stabilize the resolver path."
-    pivot = "Look, a trial might just lag again if the ISP is throttling the XC handshake. Check this 30‑second clip instead—it shows how I hardcoded the DNS directly into the UI. It bypasses the standard handshake entirely."
-    d = "Want a quick branded demo of the interface? 🤝📺"
-    msg = " ".join([team_line, a, hook, b, c, pivot, d]).strip()
+def _classify_pain_point(snippet: str) -> str:
+    t = (snippet or "").lower()
+    if any(k in t for k in ["buffer", "lag", "stutter", "freeze", "frame drop", "jitter"]):
+        return "buffering"
+    if any(k in t for k in ["smarters", "xciptv", "xc login", "login failed", "portal", "xtream"]):
+        return "generic_app"
+    if any(k in t for k in ["firestick", "fire stick", "shield", "nvidia", "android tv", "formuler", "mag", "stb"]):
+        return "device"
+    return "generic_app"
+def compose_aiden_dm(snippet, group_title, tech_context=None, lead_score: int = 0, stealth: bool = False, social_hint: str = ""):
+    opener = random.choice(["Yo,", "Hey,", "Quick one,"])
+    pain = _classify_pain_point(snippet)
+    group_tag = (group_title or "the group")
+    if pain == "buffering":
+        validation = f"{opener} saw your post in {group_tag}. That stop‑start looks like isp shaping or an mtu mismatch."
+        fix = "I don’t touch generic builds anymore—the dns path flaps under load; I run private nodes tuned for steady bitrate."
+    elif pain == "device":
+        validation = f"{opener} saw your post in {group_tag}. Firestick/Shield pain is usually background‑process limits or cache bloat."
+        fix = "Generic players mask it; I stabilize via private nodes and lean client config (dns locked, decoder sane)."
+    else:
+        validation = f"{opener} saw your post in {group_tag}. Smarters/XC login wobble is almost always dns vs xc handshake."
+        fix = "I ditched the stock stuff—hardcoded dns beats the portal flaps and keeps sessions stable."
+    if social_hint:
+        validation = f"{validation} {social_hint}"
+    pivot = ""
+    if lead_score >= 8 and not stealth:
+        pivot = "I rebrand and hardcode my own builds to bypass the exact issue you’re hitting."
+    cta = "Are you on a vpn, or is your isp hitting you directly?"
+    parts = [validation, fix, pivot, cta]
+    msg = " ".join([p for p in parts if p]).strip()
     words = msg.split()
     if len(words) > 120:
         msg = " ".join(words[:120])
-    return re.sub(r'[\\u2600-\\u27BF\\U0001F300-\\U0001FAFF]+', lambda m: m.group(0) if m.group(0) in ['🤝','📺'] else '', msg)
+    return re.sub(r'[\\u2600-\\u27BF\\U0001F300-\\U0001FAFF]+', lambda m: m.group(0) if m.group(0) in ['🤝','📺','⚡'] else '', msg)
 def _candidate_score(ident, title):
     try:
         s = 0
@@ -1940,6 +2089,54 @@ async def discover_links_from_reddit(max_links: int = 20) -> List[str]:
         return out
     except Exception:
         return []
+MISSION_WEIGHTS = {
+    "Scouter 6 (Frustrated Switcher)": 3.0,
+    "Scouter 6 (The Churn Hunter)": 2.5,
+    "Scouter 7 (Large Scale Buyer)": 2.0,
+    "Scouter 5 (Live Event Intent)": 1.8,
+    "Scouter 2 (App-Specific Setup)": 1.6,
+    "Scouter 2 (Fire Stick)": 1.4,
+    "Scouter 1 (Panels)": 0.6,
+    "Scouter 1 (Panels & Infrastructure)": 0.6,
+    "Scouter 4 (Wholesale)": 0.5,
+    "Scouter 4 (Wholesale & B2B)": 0.5,
+    "Scouter 3 (Premium OTT)": 1.0,
+    "Scouter 3 (Hardware Hooks)": 1.2,
+    "Scouter 5 (Live Sports)": 1.2,
+    "Scouter 8 (Tech-Savvy Newbie)": 1.0,
+    "Scouter 8 (New Market Trends)": 1.0,
+    "Scouter 9 (2026 High-Value)": 2.2,
+}
+def _weighted_keyword_pool():
+    pool = []
+    try:
+        for mission, arr in SCOUTER_MISSIONS.items():
+            w = float(MISSION_WEIGHTS.get(mission, 1.0))
+            for kw in arr:
+                pool.append((kw, w))
+    except Exception:
+        pass
+    return pool
+def _sample_keywords(k: int = 4):
+    pool = _weighted_keyword_pool()
+    if not pool:
+        return []
+    pop = [kw for kw, _ in pool]
+    weights = [w for _, w in pool]
+    chosen = set()
+    out = []
+    # Sample without strict replacement to keep them unique
+    for _ in range(min(k, len(pop))):
+        pick = random.choices(population=pop, weights=weights, k=1)[0]
+        tries = 0
+        while pick in chosen and tries < 5:
+            pick = random.choices(population=pop, weights=weights, k=1)[0]
+            tries += 1
+        if pick in chosen:
+            continue
+        chosen.add(pick)
+        out.append(pick)
+    return out
 async def directory_scraper_loop():
     while True:
         try:
@@ -1947,14 +2144,19 @@ async def directory_scraper_loop():
             if not should_scrape_now():
                 await asyncio.sleep(3600)
                 continue
-            keys = []
             try:
-                for arr in SCOUTER_MISSIONS.values():
-                    keys.extend(arr)
+                sample = _sample_keywords(4)
+                if not sample:
+                    raise RuntimeError("no weighted sample")
             except Exception:
-                keys = TITLE_TARGET_KEYWORDS
-            random.shuffle(keys)
-            sample = keys[:4]
+                keys = []
+                try:
+                    for arr in SCOUTER_MISSIONS.values():
+                        keys.extend(arr)
+                except Exception:
+                    keys = TITLE_TARGET_KEYWORDS
+                random.shuffle(keys)
+                sample = keys[:4]
             for kw in sample:
                 found = await _scrape_search_pages(kw, max_links=10)
                 for ln in found:
@@ -2583,8 +2785,8 @@ async def user_discovery_loop():
             if not warm_start:
                 warm_start = now_ts
                 stats["warmup_started_at"] = warm_start
-                save_json(STATS_FILE, stats)
-            stats = load_json(STATS_FILE, apex_supreme_stats)
+                await save_json_async(STATS_FILE, stats)
+            stats = await load_json_async(STATS_FILE, apex_supreme_stats)
             kw = random.choice(BUYER_INTENT_KEYWORDS) if BUYER_INTENT_KEYWORDS else random.choice(BUYER_PAIN_KEYWORDS)
             if not should_scrape_now():
                 await asyncio.sleep(600)
@@ -2600,15 +2802,15 @@ async def user_discovery_loop():
             if random.random() < 0.35:
                 kw = random.choice(ESSENTIAL_HASHTAGS)
             try:
-                potentials = load_json(POTENTIAL_TARGETS, [])
+                potentials = await load_json_async(POTENTIAL_TARGETS, [])
             except Exception:
                 potentials = []
             try:
-                verified = load_json(VERIFIED_INVITES_FILE, [])
+                verified = await load_json_async(VERIFIED_INVITES_FILE, [])
             except Exception:
                 verified = []
             try:
-                q = load_json(CANDIDATE_QUEUE_FILE, [])
+                q = await load_json_async(CANDIDATE_QUEUE_FILE, [])
             except Exception:
                 q = []
             existing_ids = {it.get("id") for it in q}
@@ -2629,7 +2831,7 @@ async def user_discovery_loop():
                 if 'joinchat' in link or (tok or '').startswith('+'):
                     q.append({"id": link, "title": title, "retry_after": 0, "attempts": 0})
             try:
-                save_json(CANDIDATE_QUEUE_FILE, q)
+                await save_json_async(CANDIDATE_QUEUE_FILE, q)
             except Exception:
                 pass
             res = await client(functions.contacts.SearchRequest(q=kw, limit=20))
@@ -2647,13 +2849,13 @@ async def user_discovery_loop():
                 if _blacklisted(title):
                      # Add to REJECTED immediately to avoid re-scan
                      try:
-                         rej = load_json(REJECTED_GROUPS, [])
+                         rej = await load_json_async(REJECTED_GROUPS, [])
                          rej.append({"id": ident, "title": title, "reason": "trade_hub_precheck", "ts": time.time()})
-                         save_json(REJECTED_GROUPS, rej)
+                         await save_json_async(REJECTED_GROUPS, rej)
                      except: pass
                      # Also add to processed groups to avoid loop
                      groups.append(ident)
-                     save_json(PROCESSED_GROUPS, groups)
+                     await save_json_async(PROCESSED_GROUPS, groups)
                      logger.info(f"🚫 [Gatekeeper] Skipped Seller Hub: {title}")
                      continue
                 if not _title_buyer_hit(title):
@@ -2844,9 +3046,10 @@ async def handle_v21_logic(event):
         
         if any(k in text for k in KEYWORD_TRIGGERS):
             try:
-                leads = load_json(LEADS_JSON, [])
+                # Use async load/save for New Lead Scoring
+                leads = await load_json_async(LEADS_JSON, [])
                 leads.append({"user_id": user_id, "group_id": group_id, "group_title": group_title, "text": event.raw_text, "ts": datetime.datetime.now().isoformat()})
-                save_json(LEADS_JSON, leads)
+                await save_json_async(LEADS_JSON, leads)
             except Exception:
                 pass
         # New Lead Scoring (2026 Engine)
@@ -2985,7 +3188,7 @@ async def handshake_processor():
                         if not market_hour_ok():
                             logger.info("Skipping DM (outside human hours).")
                             continue
-                        stats = load_json(STATS_FILE, apex_supreme_stats)
+                        stats = await load_json_async(STATS_FILE, apex_supreme_stats)
                         dm_today = stats.get("dm_initiated_today", 0)
                         me = await client.get_me()
                         is_premium = bool(getattr(me, "premium", False))
@@ -3018,14 +3221,38 @@ async def handshake_processor():
                                 social_hint = "Saw chatter about apollo/xtream issues in the group."
                         except Exception:
                             pass
+                        if outreach_deep_sleep():
+                            logger.info("Skipping DM (deep sleep active).")
+                            continue
                         await typing_heartbeat(u, random.uniform(6, 9))
                         dm_text = None
                         persona_id = await get_prospect_persona(u, chat_id) or choose_persona_id(group_title)
                         try:
-                            dm_text = compose_aiden_dm(snippet or "", group_title, _detect_tech_context(snippet or ""))
+                            lead_score = 0
+                            try:
+                                lead_score = calculate_lead_score(snippet or "", None)
+                            except Exception:
+                                lead_score = 0
+                            stealth = False
+                            try:
+                                ent = await client.get_input_entity(chat_id)
+                                full = await client(GetFullChannelRequest(ent))
+                                about = getattr(getattr(full, "full_chat", None), "about", "") or ""
+                                if "no seller" in (about or "").lower() or "no selling" in (about or "").lower():
+                                    stealth = True
+                            except Exception:
+                                stealth = False
+                            dm_text = None
+                            try:
+                                if ai_client:
+                                    dm_text = await generate_ai_dm(uname or "there", group_title, snippet or "", lead_score, social_hint, "", stealth)
+                            except Exception as e:
+                                logger.debug(f"AI DM gen failed, fallback to compose: {e}")
+                            if not dm_text:
+                                dm_text = compose_aiden_dm(snippet or "", group_title, _detect_tech_context(snippet or ""), lead_score, stealth, social_hint)
                         except Exception as e:
                             logger.error(f"Aiden DM compose error: {e}")
-                            dm_text = compose_aiden_dm(snippet or "", group_title, _detect_tech_context(snippet or ""))
+                            dm_text = compose_aiden_dm(snippet or "", group_title, _detect_tech_context(snippet or ""), 0, False)
 
                         try:
                             bio_text = getattr(getattr(fu, "full_user", None), "about", "") or ""
@@ -3034,11 +3261,11 @@ async def handshake_processor():
                         except Exception:
                             pass
                         try:
-                            stats = load_json(STATS_FILE, apex_supreme_stats)
+                            stats = await load_json_async(STATS_FILE, apex_supreme_stats)
                             last_text = stats.get("last_dm_text")
                             dm_text = ensure_spintax_variation(dm_text, last_text)
                             stats["last_dm_text"] = dm_text
-                            save_json(STATS_FILE, stats)
+                            await save_json_async(STATS_FILE, stats)
                         except Exception:
                             pass
                         try:
@@ -3054,7 +3281,7 @@ async def handshake_processor():
                             log_activity("dm_sent", f"{u}:{group_title}")
                             stats["dm_initiated_today"] = dm_today + 1
                             stats["unique_dms"] = stats.get("unique_dms", 0) + 1
-                            save_json(STATS_FILE, stats)
+                            await save_json_async(STATS_FILE, stats)
                             logger.info(f"DM sent to {u}. Count today: {stats['dm_initiated_today']}/{cap}")
                             await asyncio.sleep(random.randint(900, 1200))
                         except (UserPrivacyRestrictedError, YouBlockedUserError, PeerIdInvalidError) as e:
@@ -3081,6 +3308,14 @@ async def typing_heartbeat(entity, duration=6.0):
             await asyncio.sleep(3)
     except Exception:
         pass
+
+# Deep sleep control for PeerFloodError events
+_deep_sleep_until = 0.0
+def activate_deep_sleep(seconds: int):
+    global _deep_sleep_until
+    _deep_sleep_until = max(_deep_sleep_until, time.time() + max(0, seconds))
+def outreach_deep_sleep() -> bool:
+    return time.time() < _deep_sleep_until
 def quality_gate(full_user):
     try:
         usr = getattr(full_user, "user", None)

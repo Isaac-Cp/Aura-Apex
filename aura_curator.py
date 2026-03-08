@@ -23,14 +23,151 @@ from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInv
 # Forum topic APIs vary across Telethon versions; dynamic mapping disabled for compatibility
 from groq import AsyncGroq
 from PIL import Image, ImageDraw, ImageFont
+from zoneinfo import ZoneInfo
+try:
+    import sentry_sdk
+    _SENTRY_DSN = (os.environ.get("SENTRY_DSN") or "").strip()
+    if _SENTRY_DSN:
+        sentry_sdk.init(dsn=_SENTRY_DSN, traces_sample_rate=float(os.environ.get("SENTRY_TRACES", "0.0") or 0.0))
+except Exception:
+    pass
 
 from config import (
     API_ID, API_HASH, SESSION_STRING, GROQ_API_KEY, CURATOR_CHANNEL_ID, JUNK_KEYWORDS,
     REQUEST_TIMEOUT, CHECK_INTERVAL_SECONDS, BRAND_COLORS, PLATFORM_SPECS, PRO_TIPS
 )
+from config import rules as CONFIG_RULES
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-HEADERS = {"User-Agent": USER_AGENT}
+try:
+    from fake_useragent import UserAgent
+    _UA_GEN = UserAgent()
+except Exception:
+    _UA_GEN = None
+def _build_headers() -> Dict[str, str]:
+    try:
+        ua = _UA_GEN.random if _UA_GEN else USER_AGENT
+    except Exception:
+        ua = USER_AGENT
+    try:
+        import random as _r
+        lang = _r.choice(["en-US,en;q=0.9", "en-GB,en;q=0.9", "es-ES,es;q=0.9"])
+    except Exception:
+        lang = "en-US,en;q=0.9"
+    return {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": lang,
+        "DNT": "1",
+        "Upgrade-Insecure-Requests": "1"
+    }
+try:
+    from curl_cffi import requests as curl_requests
+except Exception:
+    curl_requests = None
+try:
+    from selectolax.parser import HTMLParser as _SEL_HTML
+except Exception:
+    _SEL_HTML = None
+try:
+    import lxml  # type: ignore
+    BS4_PARSER = "lxml"
+except Exception:
+    BS4_PARSER = "html.parser"
+_URL_HTML_CACHE: Dict[str, Tuple[float, str]] = {}
+_URL_HTML_TTL = float(os.environ.get("CURATOR_HTML_CACHE_TTL", "900") or 900)
+_LLM_PAGE_CACHE: Dict[str, Tuple[float, List[Tuple[str, str, str]]]] = {}
+_LLM_PAGE_TTL = float(os.environ.get("CURATOR_LLM_CACHE_TTL", "86400") or 86400)
+_TME_SANITIZE_RE = re.compile(r'(https?://\S+|t\s?\.\s?me/\S+)', re.IGNORECASE)
+
+_DEDUP_PATH = os.path.join("data", "curator_dedup.jsonl")
+_DEDUP_CACHE: List[Dict[str, Any]] = []
+_POSTED_LINKS_CACHE: Set[str] = set()
+_CORE_TERMS = ["iptv", "tivimate", "smarters", "firestick", "m3u"]
+
+import math
+
+def _tok(title: str) -> Dict[str, int]:
+    t = re.findall(r"[a-z0-9]+", (title or "").lower())
+    d: Dict[str, int] = {}
+    for w in t:
+        d[w] = d.get(w, 0) + 1
+    return d
+
+def _norm(v: Dict[str, int]) -> float:
+    n2 = sum(x*x for x in v.values())
+    return max(1e-9, math.sqrt(n2))
+
+def _cos(a: Dict[str, int], norm_a: float, b: Dict[str, int], norm_b: float) -> float:
+    if not a or not b:
+        return 0.0
+    keys = set(a.keys()) & set(b.keys())
+    num = sum(a[k]*b[k] for k in keys)
+    den = norm_a * norm_b
+    return 0.0 if den == 0 else num/den
+
+def _load_dedup():
+    global _DEDUP_CACHE, _POSTED_LINKS_CACHE
+    if _DEDUP_CACHE:
+        return
+    try:
+        if os.path.exists(_DEDUP_PATH):
+            with open(_DEDUP_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        # Pre-calculate norm for cached vectors
+                        if "vec" in rec and "norm" not in rec:
+                            rec["norm"] = _norm(rec["vec"])
+                        _DEDUP_CACHE.append(rec)
+                        if "link" in rec:
+                            _POSTED_LINKS_CACHE.add(rec["link"])
+                    except Exception:
+                        continue
+    except Exception:
+        _DEDUP_CACHE = []
+        _POSTED_LINKS_CACHE = set()
+
+def _save_dedup_sync(title: str, link: str = ""):
+    try:
+        os.makedirs("data", exist_ok=True)
+        vec = _tok(title)
+        norm = _norm(vec)
+        rec = {"title": title, "vec": vec, "norm": norm, "link": link, "ts": int(time.time())}
+        with open(_DEDUP_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        _DEDUP_CACHE.append(rec)
+        if link:
+            _POSTED_LINKS_CACHE.add(link)
+    except Exception:
+        pass
+
+async def _save_dedup(title: str, link: str = ""):
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _save_dedup_sync, title, link)
+
+def _is_duplicate(title: str, link: str = "", th: float = 0.90) -> bool:
+    _load_dedup()
+    if link and link in _POSTED_LINKS_CACHE:
+        return True
+    
+    vec_a = _tok(title)
+    norm_a = _norm(vec_a)
+    
+    # Only check the last 1500 items to keep CPU usage low
+    # Most duplicates appear within recent history
+    for rec in reversed(_DEDUP_CACHE[-1500:]):
+        try:
+            vec_b = rec.get("vec") or {}
+            norm_b = rec.get("norm") or _norm(vec_b)
+            if _cos(vec_a, norm_a, vec_b, norm_b) >= th:
+                return True
+        except Exception:
+            continue
+    return False
 
 SYSTEM_PROMPT = (
     "Act as Aiden, an expert in IPTV player optimization.\n"
@@ -43,7 +180,120 @@ SYSTEM_PROMPT = (
     "- End with a low-pressure note. No links inside the body."
 )
 
-ai_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+# Load additional env vars not exported by config
+IMAGE_GEN_ENDPOINT = os.getenv("IMAGE_GEN_ENDPOINT")
+IMAGE_GEN_API_KEY = os.getenv("IMAGE_GEN_API_KEY")
+IMAGE_GEN_MODEL = os.getenv("IMAGE_GEN_MODEL", "sdxl")
+
+# Initialize AI Client
+try:
+    if GROQ_API_KEY:
+        ai_client = AsyncGroq(api_key=GROQ_API_KEY)
+    else:
+        ai_client = None
+except Exception as e:
+    logger.warning(f"Groq Init Failed: {e}")
+    ai_client = None
+
+_AI_MAX_PER_MIN = int(os.environ.get("CURATOR_AI_MAX_PER_MIN", "8"))
+_ai_calls_ts: List[float] = []
+def _ai_allow_now() -> bool:
+    now = time.time()
+    cutoff = now - 60.0
+    # prune
+    while _ai_calls_ts and _ai_calls_ts[0] < cutoff:
+        _ai_calls_ts.pop(0)
+    if len(_ai_calls_ts) < _AI_MAX_PER_MIN:
+        _ai_calls_ts.append(now)
+        return True
+    return False
+
+_SCRAPE_CONCURRENCY = max(1, int(os.environ.get("CURATOR_CONCURRENCY", "3")))
+_scrape_sem = asyncio.Semaphore(_SCRAPE_CONCURRENCY)
+_SOURCE_CB: Dict[str, Dict[str, Any]] = {}
+_SOURCE_METRICS: Dict[str, Dict[str, Any]] = {}
+def _source_allowed(name: str) -> bool:
+    st = _SOURCE_CB.get(name) or {}
+    until = float(st.get("reopen_at", 0.0) or 0.0)
+    return time.time() >= until
+def _record_source_result(name: str, ok: bool, threshold: int = 3, backoff_sec: int = 1800):
+    st = _SOURCE_CB.get(name) or {"fail": 0, "reopen_at": 0.0}
+    if ok:
+        st["fail"] = 0
+        st["reopen_at"] = 0.0
+    else:
+        st["fail"] = int(st.get("fail", 0)) + 1
+        if st["fail"] >= threshold:
+            st["reopen_at"] = time.time() + backoff_sec
+    _SOURCE_CB[name] = st
+    m = _SOURCE_METRICS.get(name) or {"attempts": 0, "success": 0, "fail": 0}
+    m["attempts"] = int(m.get("attempts", 0)) + 1
+    if ok:
+        m["success"] = int(m.get("success", 0)) + 1
+    else:
+        m["fail"] = int(m.get("fail", 0)) + 1
+    _SOURCE_METRICS[name] = m
+
+def _curator_tzinfo():
+    """Returns ZoneInfo based on CURATOR_TZ or CURATOR_MARKET (e.g., 'US', 'UK')."""
+    try:
+        # 1. Explicit TZ takes precedence
+        tz_env = (os.environ.get("CURATOR_TZ") or "").strip()
+        if tz_env:
+            return ZoneInfo(tz_env)
+            
+        # 2. Market-based lookup (matching Aura Apex Supreme logic)
+        market = (os.environ.get("CURATOR_MARKET") or "").strip().lower()
+        if market in ("us", "usa", "en-us", "ny", "new_york"):
+            return ZoneInfo("America/New_York")
+        if market in ("uk", "gb", "en-uk", "london"):
+            return ZoneInfo("Europe/London")
+        if market in ("eu", "europe", "berlin"):
+            return ZoneInfo("Europe/Berlin")
+            
+        return ZoneInfo("UTC")
+    except Exception:
+        return ZoneInfo("UTC")
+
+async def _run_source(name: str, coro_func):
+    if not _source_allowed(name):
+        return []
+    try:
+        t0 = time.time()
+        async with _scrape_sem:
+            res = await coro_func()
+        dt = (time.time() - t0) * 1000.0
+        ok = bool(res)
+        _record_source_result(name, ok)
+        try:
+            m = _SOURCE_METRICS.get(name) or {"attempts": 0, "success": 0, "fail": 0, "lat_ms_sum": 0.0, "lat_samples": 0}
+            m["lat_ms_sum"] = float(m.get("lat_ms_sum", 0.0)) + dt
+            m["lat_samples"] = int(m.get("lat_samples", 0)) + 1
+            _SOURCE_METRICS[name] = m
+        except Exception:
+            pass
+        return res
+    except Exception:
+        _record_source_result(name, False)
+        return []
+
+def validate_curator_env():
+    errs = []
+    if not API_ID or not str(API_ID).isdigit() or int(API_ID) <= 0:
+        errs.append("Invalid API_ID")
+    if not API_HASH or not re.fullmatch(r'[0-9a-fA-F]{32}', str(API_HASH)):
+        errs.append("Invalid API_HASH")
+    sess = (SESSION_STRING or os.environ.get("SESSION_STRING") or "").strip()
+    if not sess or len(sess) < 50:
+        errs.append("Missing or invalid SESSION_STRING")
+    try:
+        int(CURATOR_CHANNEL_ID or "0")
+    except Exception:
+        pass
+    if errs:
+        for e in errs:
+            logger.critical(e)
+        raise SystemExit(1)
 
 IPTV_FILTER_KEYWORDS = [
     "iptv", "tivimate", "smarters", "apk", "firestick",
@@ -63,36 +313,38 @@ GUIDE_KEYWORDS = ["tivimate", "smarters", "ibo", "ott", "m3u", "setup", "tutoria
 FIX_KEYWORDS = ["isp", "throttling", "vpn", "handshake", "error", "fix", "buffering"]
 NEWS_KEYWORDS = ["crackdown", "news", "update", "new channels", "broadcasting", "global"]
 TOPIC_MAP = {
-    "guide": {"hashtag": "#AuraGuide", "thread": 4, "tags": ["#AuraGuide", "#ApexTutorial"]},
-    "fix": {"hashtag": "#AuraFix", "thread": 2, "tags": ["#AuraFix", "#ApexFix"]},
-    "news": {"hashtag": "#AuraNews", "thread": 9, "tags": ["#AuraNews", "#ApexNews"]}
+    "guide": {"hashtag": "#AuraGuide", "thread": 4},
+    "fix": {"hashtag": "#AuraFix", "thread": 2},
+    "news": {"hashtag": "#AuraNews", "thread": 9},
+    "update": {"hashtag": "#AuraUpdate", "thread": 3}
 }
 
 POST_IMAGE_CACHE = {}
 IMAGE_GEN_ENDPOINT = os.environ.get("IMAGE_GEN_ENDPOINT", "").strip()
 IMAGE_GEN_API_KEY = os.environ.get("IMAGE_GEN_API_KEY", "").strip()
 IMAGE_GEN_MODEL = os.environ.get("IMAGE_GEN_MODEL", "sdxl").strip()
-ai_client = None
-if (os.environ.get("GROQ_API_KEY") or "").strip():
-    try:
-        ai_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY").strip())
-    except Exception as _e:
-        ai_client = None
+ 
 
 def classify_topic(title: str, description: str = "") -> Dict[str, Any]:
     s = ((title or "") + " " + (description or "")).lower()
+    
+    # Priority for Update/Recap (AuraUpdate)
+    if any(k in s for k in ["weekly recap", "performance recap", "changelog", "new version"]):
+        m = TOPIC_MAP["update"]
+        return {"topic": "update", "hashtag": m["hashtag"], "thread": m["thread"]}
+        
     if any(k in s for k in GUIDE_KEYWORDS):
         m = TOPIC_MAP["guide"]
-        return {"topic": "guide", "hashtag": m["hashtag"], "thread": m["thread"], "tags": m["tags"]}
+        return {"topic": "guide", "hashtag": m["hashtag"], "thread": m["thread"]}
     if any(k in s for k in FIX_KEYWORDS):
         m = TOPIC_MAP["fix"]
-        return {"topic": "fix", "hashtag": m["hashtag"], "thread": m["thread"], "tags": m["tags"]}
+        return {"topic": "fix", "hashtag": m["hashtag"], "thread": m["thread"]}
     if any(k in s for k in NEWS_KEYWORDS):
         m = TOPIC_MAP["news"]
-        return {"topic": "news", "hashtag": m["hashtag"], "thread": m["thread"], "tags": m["tags"]}
+        return {"topic": "news", "hashtag": m["hashtag"], "thread": m["thread"]}
     h = assign_group_hashtag(title)
     th = THREAD_MAP.get(h) or THREAD_MAP.get("#AuraNews")
-    return {"topic": "news", "hashtag": h, "thread": th, "tags": ["#AuraNews", "#ApexNews"]}
+    return {"topic": "news", "hashtag": h, "thread": th}
 
 def is_high_value_topic(title: str) -> bool:
     t = (title or "").lower()
@@ -104,32 +356,79 @@ def is_high_value_topic(title: str) -> bool:
     ]
     return any(p in t for p in hv)
 
-def get_pro_tip_for_topic(topic: str) -> str:
+async def get_pro_tip_for_topic(topic: str) -> str:
+    """
+    Generates a contextual 'Pro Tip' using LLM.
+    """
     import random
-    if topic == "guide":
-        c = [
+    
+    # Fallback tips if AI is unavailable or fails
+    fallbacks = {
+        "guide": [
             "Large buffer size reduces jitter on 4K streams.",
             "Favor Software decoder when hardware acceleration stutters.",
             "Keep EPG refresh at 24h for smoother navigation."
-        ]
-        return f"💡 Aiden’s Pro-Tip: {random.choice(c)}"
-    if topic == "fix":
-        c = [
+        ],
+        "fix": [
             "Switch VPN to TCP on match days for stable handshakes.",
             "Pin DNS to 1.1.1.1 or 8.8.8.8 to stop portal flaps.",
             "Reduce reconnect loops by lowering retry aggressiveness."
+        ],
+        "news": [
+            "Stick with Aura Apex for secure, consistent streaming.",
+            "Own hardware beats resellers when services flap.",
+            "Hardened APKs avoid third‑party scanner noise."
         ]
-        return f"💡 Aiden’s Pro-Tip: {random.choice(c)}"
-    c = [
-        "Stick with Aura Apex for secure, consistent streaming.",
-        "Own hardware beats resellers when services flap.",
-        "Hardened APKs avoid third‑party scanner noise."
-    ]
-    return f"💡 Aiden’s Pro-Tip: {random.choice(c)}"
+    }
+    
+    default_tip = f"***💡 Aiden’s Pro-Tip:*** {random.choice(fallbacks.get(topic, fallbacks['news']))}"
+
+    if not ai_client:
+        return default_tip
+
+    try:
+        if not _ai_allow_now():
+             await asyncio.sleep(1.0)
+
+        sys_prompt = (
+            "You are Aiden, an elite IPTV engineer. Write ONE short, advanced pro-tip "
+            "related to streaming stability, security, or setup. "
+            "Style: Insider knowledge, technical, concise. "
+            "Formatting: Use **bold** and _italics_ sparingly. "
+            "The label 'Aiden's Pro-Tip:' MUST be both bold and italic: ***Aiden’s Pro-Tip:***. "
+            "Length: Max 20 words."
+        )
+        
+        user_prompt = f"Topic: {topic}. Give me a technical tip."
+
+        resp = await ai_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.8,
+            max_tokens=60
+        )
+        
+        tip = (resp.choices[0].message.content or "").strip()
+        
+        # Strip any existing labels/emojis/formatting to normalize
+        # This removes variations of "Aiden's Pro-Tip", emojis, and asterisks from the start
+        clean_tip = re.sub(r'^[\s\*💡]*(?:Aiden[\'’]s\s+)?Pro-Tip:[\s\*💡]*', '', tip, flags=re.IGNORECASE).strip()
+        
+        # Re-apply the canonical label
+        tip = f"***💡 Aiden’s Pro-Tip:*** {clean_tip}"
+            
+        return _TME_SANITIZE_RE.sub('', tip)
+
+    except Exception as e:
+        logger.error(f"Pro-Tip AI Error: {e}")
+        return default_tip
 
 def is_iptv_content(title: str, description: str = "") -> bool:
     combined = ((title or "") + " " + (description or "")).lower()
-    return any(k in combined for k in IPTV_FILTER_KEYWORDS)
+    return any(k in combined for k in _CORE_TERMS)
 
 def strict_iptv_allowed(title: str, description: str = "") -> bool:
     s = ((title or "") + " " + (description or "")).lower()
@@ -148,26 +447,64 @@ def safe_image_allowed(text: str) -> bool:
         logger.debug(f"Error checking junk keywords: {e}")
     bad = ["adult", "nsfw", "violent", "gore", "hate", "racist", "sex"]
     return not any(b in s for b in bad)
-def _build_tags(title: str) -> List[str]:
-    t = (title or "").lower()
+async def _build_dynamic_tags_async(title: str, body: str) -> List[str]:
+    """
+    Generates dynamic hashtags based on content using AI if available,
+    falling back to keyword extraction.
+    """
+    if ai_client and _ai_allow_now():
+        try:
+            sys_prompt = (
+                "Extract 3-5 high-value, technical hashtags for an IPTV Telegram post. "
+                "Include the primary topic (News, Guide, or Fix). "
+                "Output ONLY the hashtags separated by spaces. Example: #IPTV #Firestick #DNSFix"
+            )
+            user_prompt = f"Title: {title}\nBody: {body[:500]}"
+            resp = await ai_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.5,
+                max_tokens=50
+            )
+            tags_text = (resp.choices[0].message.content or "").strip()
+            # Clean up
+            tags = [t if t.startswith("#") else f"#{t}" for t in tags_text.split() if len(t) > 1]
+            return tags[:5]
+        except Exception as e:
+            logger.debug(f"Dynamic Tag AI Error: {e}")
+
+    # Fallback to local keyword extraction
+    t = (title + " " + body).lower()
     extra = []
-    if "firestick" in t:
-        extra.append("#Firestick")
-    if "tivimate" in t:
-        extra.append("#TiviMate")
-    if "dns" in t:
-        extra.append("#DNS")
-    if "buffer" in t:
-        extra.append("#NoBuffering")
-    if "rebrand" in t or "white label" in t:
-        extra.append("#WhiteLabelIPTV")
-    if "stream" in t:
-        extra.append("#Streaming")
+    keywords = {
+        "firestick": "#Firestick",
+        "tivimate": "#TiviMate",
+        "dns": "#DNS",
+        "buffer": "#NoBuffering",
+        "rebrand": "#WhiteLabelIPTV",
+        "white label": "#WhiteLabelIPTV",
+        "stream": "#Streaming",
+        "handshake": "#HandshakeFix",
+        "packet loss": "#NetworkOptimization",
+        "isp": "#ISPThrottling",
+        "vpn": "#VPNSafety",
+        "android": "#AndroidTV",
+        "nvidia": "#NvidiaShield",
+        "smarters": "#IPTVPro"
+    }
+    for k, v in keywords.items():
+        if k in t:
+            extra.append(v)
+    
+    # Unique and limited
     out = []
     for tag in extra:
         if tag not in out:
             out.append(tag)
-        if len(out) >= 2:
+        if len(out) >= 4:
             break
     return out
 def generate_4k_image(title: str, concept_text: str = "") -> Optional[bytes]:
@@ -187,32 +524,80 @@ def generate_4k_image(title: str, concept_text: str = "") -> Optional[bytes]:
 
 async def _build_image_prompt(title: str, body: str, topic: str) -> str:
     try:
-        base = f"Create an informative, clean promo image related to '{title}'. Topic: {topic}. Style: modern tech, high contrast, legible typography. No faces."
+        # Strict high-fidelity style
+        base_style = "cinematic lighting, 8k resolution, photorealistic, octane render, unreal engine 5, highly detailed, sharp focus"
+        
         if not ai_client:
-            return base
-        sys_prompt = "You generate concise image briefs. Return one line describing subject, elements, colors, and mood."
-        user = f"Title: {title}\nBody: {body[:240]}\nTopic: {topic}\nConstraints: No logos, no trademarks, no faces, tech‑centric."
+            return f"A visually stunning concept art representing '{title}', {base_style}, no text"
+
+        sys_prompt = (
+            "You are an expert prompt engineer for Stable Diffusion XL. "
+            "Create a HIGHLY SPECIFIC, LITERAL visual description of the subject matter. "
+            "Do NOT use generic 'tech' backgrounds unless the topic is abstract. "
+            "If the topic is about a Firestick, describe a Firestick. "
+            "If it's about a specific app, describe its logo style or interface abstractly (but NO TEXT). "
+            "If it's about a server raid, describe police lights and server racks. "
+            "Focus on: ACTION, OBJECTS, SPECIFIC DETAILS. "
+            "Forbidden: Text, letters, words, UI overlays, generic 'cyberpunk' filler. "
+            "Style: Cinematic, photorealistic, dramatic. "
+            "Keep it under 70 words."
+        )
+        
+        user_prompt = f"Title: {title}\nContext: {body[:250]}\nTask: Write a precise visual art prompt that depicts exactly what this news is about."
+        
         try:
             resp = await ai_client.chat.completions.create(
                 model="llama-3.1-8b-instant",
-                messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user}],
-                temperature=0.5
+                messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}],
+                temperature=0.7,
+                max_tokens=100
             )
             txt = (resp.choices[0].message.content or "").strip()
-            return txt or base
+            
+            # Post-process to ensure style keywords are present
+            if "8k" not in txt.lower():
+                txt += f", {base_style}"
+            
+            return txt
         except Exception:
-            return base
+            return f"Concept art of {title}, {base_style}"
     except Exception:
-        return f"{title} — clean tech poster, minimal, dark background, neon accent"
+        return f"Concept art of {title}, {base_style}"
 
 async def _ai_generate_image(prompt: str, size: Tuple[int, int] = (1280, 720)) -> Optional[bytes]:
     try:
         if not IMAGE_GEN_ENDPOINT:
             return None
-        payload = {"prompt": prompt, "model": IMAGE_GEN_MODEL, "width": size[0], "height": size[1]}
-        headers = {"Content-Type": "application/json"}
+        
+        # Determine provider based on endpoint or env var
+        is_stability = "stability.ai" in IMAGE_GEN_ENDPOINT or os.environ.get("IMAGE_GEN_PROVIDER") == "stability"
+        
+        if is_stability:
+            # Stability AI Format (SDXL)
+            # Supported dimensions: 1024x1024, 1152x896, 1216x832, 1344x768, 1536x640, 640x1536, 768x1344, 832x1216, 896x1152
+            # We want 16:9ish, so 1344x768 is the closest valid SDXL resolution.
+            width = 1344
+            height = 768
+            
+            payload = {
+                "text_prompts": [{"text": prompt}],
+                "cfg_scale": 7,
+                "height": height,
+                "width": width,
+                "samples": 1,
+                "steps": 30,
+            }
+        else:
+            # Generic/Default Format
+            payload = {"prompt": prompt, "model": IMAGE_GEN_MODEL, "width": size[0], "height": size[1]}
+            
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if is_stability:
+            headers["Accept"] = "image/png" # Request raw bytes directly
+            
         if IMAGE_GEN_API_KEY:
             headers["Authorization"] = f"Bearer {IMAGE_GEN_API_KEY}"
+            
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
         async with aiohttp.ClientSession(headers=headers) as session:
             for _ in range(2):
@@ -220,18 +605,32 @@ async def _ai_generate_image(prompt: str, size: Tuple[int, int] = (1280, 720)) -
                     async with session.post(IMAGE_GEN_ENDPOINT, json=payload, timeout=60, ssl=ssl_ctx) as r:
                         if r.status == 200:
                             ct = r.headers.get("Content-Type", "")
-                            if "application/json" in ct:
+                            # Stability AI returns raw image bytes if Accept: image/png
+                            if "image" in ct:
+                                raw = await r.read()
+                                return raw if raw else None
+                            elif "application/json" in ct:
                                 data = await r.json()
-                                b64 = (data.get("image_base64") or "").strip()
+                                # Handle various JSON response formats
+                                if "artifacts" in data: # Stability AI JSON format
+                                    b64 = data["artifacts"][0].get("base64")
+                                else:
+                                    b64 = (data.get("image_base64") or "").strip()
+                                
                                 if not b64:
                                     return None
                                 import base64
                                 raw = base64.b64decode(b64)
                                 return raw
-                            else:
-                                raw = await r.read()
-                                return raw if raw else None
-                except Exception:
+                        else:
+                            # Log error for debugging
+                            try:
+                                err_text = await r.text()
+                                logger.error(f"Stability AI Error {r.status}: {err_text}")
+                            except:
+                                pass
+                except Exception as e:
+                    logger.error(f"Image Gen Request Error: {e}")
                     await asyncio.sleep(1.0)
         return None
     except Exception:
@@ -269,19 +668,121 @@ async def get_session() -> aiohttp.ClientSession:
     global _session
     if _session is None or _session.closed:
         ssl_context = ssl.create_default_context(cafile=certifi.where())
-        _session = aiohttp.ClientSession(headers=HEADERS, connector=aiohttp.TCPConnector(ssl=ssl_context))
+        try:
+            _lim = max(1, int(os.environ.get("CURATOR_CONCURRENCY", "3"))) * 2
+        except Exception:
+            _lim = 6
+        _session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context, limit=_lim))
     return _session
 
 async def get_html(url: str) -> str:
     try:
-        session = await get_session()
-        async with session.get(url, timeout=REQUEST_TIMEOUT) as r:
-            if r.status == 200:
-                return await r.text()
+        attempts = 2
+        delay = 0.6
+        for i in range(attempts):
+            try:
+                session = await get_session()
+                async with session.get(url, timeout=REQUEST_TIMEOUT, headers=_build_headers()) as r:
+                    if r.status == 200:
+                        return await r.text()
+            except Exception:
+                pass
+            if i < attempts - 1:
+                import random as _r
+                jitter = max(0.1, _r.gauss(delay, delay*0.25))
+                await asyncio.sleep(jitter)
+                delay = min(8.0, delay * 1.8)
+        if curl_requests:
+            try:
+                resp = curl_requests.get(url, impersonate="chrome120", timeout=REQUEST_TIMEOUT)
+                if getattr(resp, "status_code", 0) == 200:
+                    return resp.text
+            except Exception:
+                pass
+        if (os.environ.get("CURATOR_BROWSER_FALLBACK","").strip().lower() in ("1","true","yes")):
+            try:
+                content = await get_html_browser(url)
+                if content:
+                    return content
+            except Exception:
+                pass
         return ""
     except Exception as e:
         logger.error(f"Request failed for {url}: {e}")
+        if curl_requests:
+            try:
+                resp = curl_requests.get(url, impersonate="chrome120", timeout=REQUEST_TIMEOUT)
+                if getattr(resp, "status_code", 0) == 200:
+                    return resp.text
+            except Exception:
+                pass
+        if (os.environ.get("CURATOR_BROWSER_FALLBACK","").strip().lower() in ("1","true","yes")):
+            try:
+                content = await get_html_browser(url)
+                if content:
+                    return content
+            except Exception:
+                pass
         return ""
+
+async def get_html_browser(url: str) -> str:
+    try:
+        from playwright.async_api import async_playwright
+    except Exception:
+        return ""
+    try:
+        ua = (_UA_GEN.random if _UA_GEN else USER_AGENT)
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+            context = await browser.new_context(user_agent=ua, viewport={"width":1280,"height":800})
+            page = await context.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            content = await page.content()
+            await context.close()
+            await browser.close()
+            return content or ""
+    except Exception:
+        return ""
+
+async def ai_semantic_extract_links(html: str, source_name: str) -> List[Tuple[str, str, str]]:
+    try:
+        if not ai_client or not html:
+            return []
+        if not _ai_allow_now():
+            await asyncio.sleep(1.0)
+        txt = re.sub(r'<[^>]+>', ' ', html or '')
+        txt = re.sub(r'\s+', ' ', txt).strip()
+        if not txt:
+            return []
+        sys_p = "You are a headless data extractor. Your input is raw HTML or text. Your output must be a strict JSON array of objects with keys: title (string), url (string). No explanations or code fences."
+        user_p = "Extract up to 10 IPTV-relevant articles with absolute URLs. Only include items where both title and url exist. If none exist, return an empty JSON array. Content: " + txt[:8000]
+        resp = await ai_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "system", "content": sys_p}, {"role": "user", "content": user_p}],
+            temperature=0.2,
+            max_tokens=400
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        data = None
+        try:
+            data = json.loads(raw)
+        except Exception:
+            m = re.search(r'\\[.*\\]', raw, flags=re.S)
+            if m:
+                try:
+                    data = json.loads(m.group(0))
+                except Exception:
+                    data = None
+        items = []
+        if isinstance(data, list):
+            for it in data:
+                t = (it or {}).get("title") or ""
+                u = (it or {}).get("url") or ""
+                if t and u and isinstance(t, str) and isinstance(u, str) and u.startswith("http") and is_iptv_content(t):
+                    items.append((t.strip(), u.strip(), source_name))
+        return items
+    except Exception:
+        return []
 
 async def generate_4k_image_async(title: str, concept_text: str = "") -> Optional[bytes]:
     loop = asyncio.get_running_loop()
@@ -294,28 +795,48 @@ async def scrape_troypoint() -> List[Tuple[str, str, str]]:
         if not html:
             logger.error("Aura Radar: Source blocked (TroyPoint). Shifting to secondary nodes.")
             return []
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, BS4_PARSER)
         items = []
-        
-        # Generic scraper that looks for articles or posts
+        if _SEL_HTML:
+            try:
+                dom = _SEL_HTML(html)
+                main = dom.css_first("main") or dom.body
+                if main:
+                    for tag in ["h1","h2","h3"]:
+                        for h in main.css(tag):
+                            a = h.css_first("a")
+                            if a and a.attributes.get("href"):
+                                title = (a.text() or "").strip()
+                                link = a.attributes.get("href","").strip()
+                                if link and is_iptv_content(title):
+                                    items.append((title, link, "TROYPOINT"))
+            except Exception:
+                pass
+        try:
+            main = soup.find(attrs={"role": "main"}) or soup.find("main")
+            if main:
+                for h in main.find_all(["h1", "h2", "h3"]):
+                    a = h.find("a", href=True)
+                    if a:
+                        title = (a.get_text() or "").strip()
+                        link = (a.get("href") or "").strip()
+                        if link and is_iptv_content(title):
+                            items.append((title, link, "TROYPOINT"))
+        except Exception:
+            pass
         articles = soup.select("article") or soup.select("div.post") or soup.select("div.entry") or soup.select("div.type-post") or soup.select("div.blog-post")
-        
         for art in articles:
-            # Try to find a link inside an h2 or h3 first (common for titles)
             a = art.select_one("h2 a") or art.select_one("h3 a")
-            
-            # Fallback: find the first link with an href
             if not a:
                 a = art.find("a", href=True)
-            
             if not a:
                 continue
-                
             title = (a.get_text() or "").strip()
             link = (a.get("href") or "").strip()
-            
             if link and is_iptv_content(title):
                 items.append((title, link, "TROYPOINT"))
+        if not items:
+            items.extend(await ai_semantic_extract_links(html, "TROYPOINT"))
         return items
     except Exception:
         logger.error("Aura Radar: Source blocked (TroyPoint). Shifting to secondary nodes.")
@@ -329,13 +850,38 @@ async def scrape_iptvwire() -> List[Tuple[str, str, str]]:
         if not html:
             logger.error("Aura Radar: Source blocked (IPTVWire). Shifting to secondary nodes.")
             return []
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, BS4_PARSER)
         items = []
+        if _SEL_HTML:
+            try:
+                dom = _SEL_HTML(html)
+                main = dom.css_first("main") or dom.body
+                if main:
+                    for tag in ["h1","h2","h3"]:
+                        for h in main.css(tag):
+                            a = h.css_first("a")
+                            if a and a.attributes.get("href"):
+                                title = (a.text() or "").strip()
+                                link = a.attributes.get("href","").strip()
+                                if link and is_iptv_content(title):
+                                    items.append((title, link, "IPTVWire"))
+            except Exception:
+                pass
+        try:
+            main = soup.find(attrs={"role": "main"}) or soup.find("main")
+            if main:
+                for h in main.find_all(["h1", "h2", "h3"]):
+                    a = h.find("a", href=True)
+                    if a:
+                        title = (a.get_text() or "").strip()
+                        link = (a.get("href") or "").strip()
+                        if link and is_iptv_content(title):
+                            items.append((title, link, "IPTVWire"))
+        except Exception:
+            pass
         articles = soup.find_all("article")
         if not articles:
-             # Fallback: look for generic divs with class post or similar
              articles = soup.select("div.post") or soup.select("div.entry")
-             
         for art in articles:
             a = art.find("a") 
             h2 = art.find("h2")
@@ -347,6 +893,8 @@ async def scrape_iptvwire() -> List[Tuple[str, str, str]]:
             link = (a.get("href") or "").strip()
             if link and is_iptv_content(title):
                 items.append((title, link, "IPTVWire"))
+        if not items:
+            items.extend(await ai_semantic_extract_links(html, "IPTVWire"))
         return items
     except Exception:
         logger.error("Aura Radar: Source blocked (IPTVWire). Shifting to secondary nodes.")
@@ -369,6 +917,8 @@ async def scrape_guru99() -> List[Tuple[str, str, str]]:
                 link = "https://www.guru99.com" + link
             if is_iptv_content(title) and "guru99.com" in link:
                 items.append((title, link, "Guru99"))
+        if not items:
+            items.extend(await ai_semantic_extract_links(html, "Guru99"))
         return items
     except Exception:
         logger.error("Aura Radar: Source blocked (Guru99). Shifting to secondary nodes.")
@@ -385,13 +935,11 @@ async def scrape_aftvnews() -> List[Tuple[str, str, str]]:
         articles = soup.select("article") # Fallback
     if not articles:
         articles = soup.select("div.post") or soup.select("div.entry")
-        
     for art in articles:
         a = art.select_one("h2.post-title a[rel='bookmark']")
         if not a:
             a = art.select_one("h2.post-title a")
         if not a:
-             # Generic fallback
              a = art.find("a", href=True)
         if not a:
             continue
@@ -399,6 +947,8 @@ async def scrape_aftvnews() -> List[Tuple[str, str, str]]:
         link = (a.get("href") or "").strip()
         if link and is_iptv_content(title):
             items.append((title, link, "AFTVnews"))
+    if not items:
+        items.extend(await ai_semantic_extract_links(html, "AFTVnews"))
     return items
 
 async def scrape_torrentfreak() -> List[Tuple[str, str, str]]:
@@ -410,11 +960,9 @@ async def scrape_torrentfreak() -> List[Tuple[str, str, str]]:
     articles = soup.select("article.post")
     if not articles:
         articles = soup.select("article") # Fallback
-        
     for art in articles:
         a = art.select_one("h2.entry-title a")
         if not a:
-             # Generic fallback
              a = art.find("a", href=True)
         if not a:
             continue
@@ -422,6 +970,8 @@ async def scrape_torrentfreak() -> List[Tuple[str, str, str]]:
         link = (a.get("href") or "").strip()
         if link and is_iptv_content(title):
             items.append((title, link, "TorrentFreak"))
+    if not items:
+        items.extend(await ai_semantic_extract_links(html, "TorrentFreak"))
     return items
 
 async def _scrape_reddit_generic(url: str, source_name: str) -> List[Tuple[str, str, str]]:
@@ -441,6 +991,8 @@ async def _scrape_reddit_generic(url: str, source_name: str) -> List[Tuple[str, 
                 if link.startswith("/"):
                     link = "https://old.reddit.com" + link
                 items.append((title, link, source_name))
+        if not items:
+            items.extend(await ai_semantic_extract_links(html, source_name))
         return items
     except Exception:
         logger.error(f"Aura Radar: Source blocked ({source_name}). Shifting to secondary nodes.")
@@ -456,35 +1008,57 @@ async def scrape_reddit_iptv() -> List[Tuple[str, str, str]]:
     return await _scrape_reddit_generic("https://old.reddit.com/r/IPTV/", "Reddit r/IPTV")
 
 async def humanize_post(source: str, title: str, educational: bool = False) -> str:
-    import random
-    t = (title or "").lower()
-    opener = random.choice(["Quick alert—", "Heads up—", "Just caught this—"])
-    problem = "Bitrate caps and ISP throttling"
-    guidance = [
-        "Switch decoder profiles when OS updates disrupt rendering.",
-        "Pin DNS and reduce reconnect loops to stabilize the handshake."
-    ]
-    if any(k in t for k in ["buffer", "stutter", "frame drop"]):
-        problem = "Hardware acceleration conflicting with OS video path"
-        guidance = ["Use Software decoder for this device class.", "Clear cache partition beyond app-level cache."]
-    elif any(k in t for k in ["dns", "blocked", "portal", "login", "handshake"]):
-        problem = "DNS leakage and unstable portal authentication"
-        guidance = ["Lock DNS to 1.1.1.1 or 8.8.8.8.", "Verify portal endpoint stability and token refresh."]
-    elif any(k in t for k in ["m3u", "playlist", "epg"]):
-        problem = "Aggressive EPG refresh and playlist endpoint throttling"
-        guidance = ["Stretch EPG refresh to 24h.", "Confirm playlist token/session longevity."]
-    elif any(k in t for k in ["xtream", "mac", "stalker"]):
-        problem = "Account model mismatch and server-side rate limits"
-        guidance = ["Validate credentials against the correct auth model.", "Reduce retries during peak hours."]
-    p1 = f"{opener} regarding {title}. This piece is relevant to IPTV stability and user-side reliability."
-    p2 = f"The core issue here is {problem}. Understanding this helps avoid the usual ‘clear cache’ advice that doesn’t fix the underlying transport and auth constraints."
-    p3 = f"To address it, apply disciplined configuration: {guidance[0]} {guidance[1]}"
-    p4 = "After adjustment, monitor for fewer reconnect flaps, smoother playback, and consistent portal logins across device restarts."
-    text = f"{p1}\n\n{p2}\n\n{p3}\n\n{p4}"
-    text = re.sub(r'(https?://\S+|t\.me/\S+)', '', text)
-    if len(text) > 1200:
-        text = text[:1200]
-    return text
+    """
+    Generates a human-like post summary using an LLM (Groq/Llama).
+    The persona 'Aiden' is an expert in IPTV/Streaming optimization.
+    It avoids hardcoded templates and dynamically synthesizes the content.
+    """
+    if not ai_client:
+        # Fallback only if no AI client is available (should rarely happen in prod)
+        return f"Just saw this update from {source}: {title}. Check the link for details."
+
+    try:
+        # Wait for rate limit slot
+        if not _ai_allow_now():
+             await asyncio.sleep(2.0)
+
+        sys_prompt = (
+            "You are Aiden, a cynical but helpful streaming engineer and IPTV expert. "
+            "You write short, punchy updates for a Telegram channel. "
+            "Style: Tech-savvy, slightly underground, very direct. Use terms like 'handshake', 'packet loss', 'rendering path'. "
+            "Formatting: "
+            "- Use **bold** sparingly for only the most critical technical breakthroughs. "
+            "- Use _italics_ sparingly for key emphasis. "
+            "- Any introductory labels before a colon (e.g., 'Aiden's Take:') MUST be both bold and italic: ***Label:***. "
+            "Structure: "
+            "1. A hook (casual opener). "
+            "2. The core technical problem/solution from the title. "
+            "3. Why manual fixes (clearing cache) fail vs the real fix. "
+            "4. A final 'Aiden's Take' on the impact. "
+            "Constraints: No hashtags in body. No links. Max 100 words."
+        )
+        
+        user_prompt = f"Source: {source}\nTitle: {title}\nContext: Analyze this topic and explain the technical implication for IPTV users (buffering, blocking, or setup)."
+
+        resp = await ai_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=200
+        )
+        
+        text = (resp.choices[0].message.content or "").strip()
+        
+        # Sanitize any accidental links or self-referential junk
+        text = _TME_SANITIZE_RE.sub('', text)
+        return text
+
+    except Exception as e:
+        logger.error(f"LLM Post Gen Error: {e}")
+        return f"Heads up regarding {title}. Worth a read if you're seeing stability issues on {source}."
 
 async def load_recent_links(client: TelegramClient, channel_id: int) -> set:
     seen = set()
@@ -623,13 +1197,34 @@ def _draw_text(img: Image.Image, title: str, topic: str) -> Image.Image:
         font_sub = ImageFont.truetype("arial.ttf", max(24, int(h * 0.035)))
     except Exception:
         font_sub = ImageFont.load_default()
-    tw, th = draw.textsize(tt, font=font_main)
+    
+    try:
+        tw, th = draw.textsize(tt, font=font_main)
+    except AttributeError:
+        bbox = draw.textbbox((0, 0), tt, font=font_main)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+
     draw.text((int((w - tw) / 2), int(h * 0.18)), tt, fill=(255, 255, 255), font=font_main)
     sub = "AURA APEX SUPREME"
-    sw, sh = draw.textsize(sub, font=font_sub)
+    
+    try:
+        sw, sh = draw.textsize(sub, font=font_sub)
+    except AttributeError:
+        bbox = draw.textbbox((0, 0), sub, font=font_sub)
+        sw = bbox[2] - bbox[0]
+        sh = bbox[3] - bbox[1]
+
     draw.text((int((w - sw) / 2), int(h * 0.18) + th + 30), sub, fill=(255, 215, 0), font=font_sub)
     tag = "#AuraGuide" if topic == "guide" else "#AuraFix" if topic == "fix" else "#AuraNews"
-    tw2, th2 = draw.textsize(tag, font=font_sub)
+    
+    try:
+        tw2, th2 = draw.textsize(tag, font=font_sub)
+    except AttributeError:
+        bbox = draw.textbbox((0, 0), tag, font=font_sub)
+        tw2 = bbox[2] - bbox[0]
+        th2 = bbox[3] - bbox[1]
+
     draw.text((int((w - tw2) / 2), int(h * 0.18) + th + sh + 50), tag, fill=(200, 200, 200), font=font_sub)
     return img
 
@@ -871,18 +1466,57 @@ async def extract_instructional_content(article_url: str) -> Tuple[List[str], di
     except Exception:
         return [], {"accuracy": 0.0, "completeness": 0.0, "hierarchy": 0.0}
 
-def format_instructional_body(title: str, steps: List[str]) -> str:
+async def format_instructional_body(title: str, steps: List[str]) -> str:
     if not steps:
         return ""
-    parts = []
-    parts.append(f"Just caught this—{title}. Actionable walkthrough:")
-    for i, s in enumerate(steps, 1):
-        parts.append(f"{i}. {s}")
-    txt = "\n".join(parts)
-    txt = re.sub(r'(https?://\S+|t\.me/\S+)', '', txt)
-    if len(txt) > 1400:
-        txt = txt[:1400]
-    return txt
+    
+    # If no AI client, fallback to simple list
+    if not ai_client:
+        parts = []
+        parts.append(f"Just caught this—{title}. Actionable walkthrough:")
+        for i, s in enumerate(steps, 1):
+            parts.append(f"{i}. {s}")
+        txt = "\n".join(parts)
+        return _TME_SANITIZE_RE.sub('', txt)[:1400]
+
+    try:
+        if not _ai_allow_now():
+            await asyncio.sleep(2.0)
+            
+        sys_prompt = (
+            "You are Aiden, an IPTV expert. Convert these raw steps into a clean, "
+            "easy-to-follow guide for a Telegram post. "
+            "Style: Direct, imperative, helpful. "
+            "Format: Numbered list. "
+            "Formatting: "
+            "- Use **bold** and _italics_ sparingly to maintain high readability. "
+            "- Any step headers or labels before a colon (e.g., 'Step 1:') MUST be both bold and italic: ***Step 1:***. "
+            "Constraint: Max 200 words. No hashtags."
+        )
+        
+        user_prompt = f"Title: {title}\nRaw Steps:\n" + "\n".join(steps)
+        
+        resp = await ai_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.3,
+            max_tokens=300
+        )
+        
+        txt = (resp.choices[0].message.content or "").strip()
+        return _TME_SANITIZE_RE.sub('', txt)
+
+    except Exception as e:
+        logger.error(f"LLM Instructional Body Error: {e}")
+        # Fallback
+        parts = []
+        parts.append(f"Guide: {title}")
+        for i, s in enumerate(steps, 1):
+            parts.append(f"{i}. {s}")
+        return "\n".join(parts)[:1400]
 
 async def download_image(url: str) -> Image.Image | None:
     try:
@@ -982,36 +1616,25 @@ def load_local_links() -> set:
 def append_local_link(link: str) -> None:
     if not local_store_enabled():
         return
-    p = os.path.join("data", "posted_links.json")
     try:
-        with open(p, "a", encoding="utf-8") as f:
+        os.makedirs("data", exist_ok=True)
+    except Exception:
+        pass
+    p1 = os.path.join("data", "posted_links.json")
+    p2 = os.path.join("data", "posted_links.jsonl")
+    try:
+        with open(p1, "a", encoding="utf-8") as f:
             f.write(link.strip() + "\n")
+    except Exception:
+        pass
+    try:
+        rec = {"link": link.strip(), "ts": int(time.time())}
+        with open(p2, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
     except Exception:
         pass
 
 WELCOME_TAG = "[Aura Welcome]"
-
-async def ensure_welcome_message(client: TelegramClient, channel_id: int) -> None:
-    try:
-        msgs = await client.get_messages(channel_id, limit=10)
-        if any(("Welcome to Aura Apex" in ((getattr(m, "text", "") or ""))) for m in msgs):
-            return
-        header = "**🖼️ #AuraDemo | Welcome to Aura Apex**"
-        body = (
-            "Heads up—this channel shares fixes that actually matter: decoder choice, "
-            "DNS/portal handshake stability, and sane EPG refresh. "
-            "Aiden: we hardcode what users keep breaking, so stability sticks."
-        )
-        pro_tip_block = "> 💡 **Aiden’s Quick Hit:** Pin DNS and cut reconnect loops to stop handshake flaps."
-        contact_line = "📩 @AuraApexSupport_Bot"
-        text = f"{header}\n\n{body}\n\n{pro_tip_block}\n\n{contact_line}\n#AuraDemo"
-        msg = await client.send_message(channel_id, text)
-        try:
-            await client.pin_message(channel_id, msg)
-        except Exception:
-            pass
-    except Exception:
-        pass
 
 async def load_forum_thread_map(client: TelegramClient, channel_id: int) -> dict:
     try:
@@ -1043,13 +1666,47 @@ def emoji_for_hashtag(tag: str) -> str:
         return "🚀"
     if tag == "#AuraGuide":
         return "📖"
-    if tag == "#AuraDemo":
-        return "🖼️"
     if tag == "#AuraNews":
         return "🛰️"
     return "📡"
 
-async def post_to_channel(client: TelegramClient, channel_id: int, source: str, title: str, link: str):
+async def rewrite_headline(title: str) -> str:
+    """
+    Rewrites listicle/clickbait titles to be direct and professional.
+    Example: "10 Best IPTV Apps" -> "The Best IPTV Apps"
+    """
+    if not ai_client:
+        # Fallback regex cleanup for common listicle patterns
+        clean = re.sub(r'^\d+\s+(Best|Top|Greatest|Most)\s+', r'\1 ', title, flags=re.IGNORECASE)
+        return clean
+
+    try:
+        sys_prompt = (
+            "You are a copy editor. Rewrite the headline to remove listicle numbers and clickbait. "
+            "Make it direct, authoritative, and concise. "
+            "Examples:\n"
+            "- '10 Best Firestick Apps' -> 'Essential Firestick Apps'\n"
+            "- '7 Ways to Fix Buffering' -> 'How to Fix Buffering'\n"
+            "- 'Top 5 IPTV Players' -> 'Top IPTV Players Ranked'\n"
+            "Do NOT use quotes. Output ONLY the new headline."
+        )
+        
+        resp = await ai_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": f"Rewrite: {title}"}],
+            temperature=0.3,
+            max_tokens=20
+        )
+        
+        new_title = (resp.choices[0].message.content or "").strip()
+        # Sanity check: if it returns something too long or empty, keep original
+        if len(new_title) > len(title) + 20 or not new_title:
+            return title
+        return _TME_SANITIZE_RE.sub('', new_title)
+    except Exception:
+        return title
+
+async def post_to_channel(client: TelegramClient, channel_id: int, source: str, title: str, link: str, verified: bool = False):
     try:
         testing = (os.environ.get("AURA_MODE", "").strip().lower() == "testing")
         sensitive = is_sensitive_url(link)
@@ -1060,31 +1717,43 @@ async def post_to_channel(client: TelegramClient, channel_id: int, source: str, 
         if not testing:
             if not strict_iptv_allowed(title) or competitor_banned(title):
                 return False
-        topic_info = classify_topic(title)
+        
+        # Rewrite title to remove listicle numbers
+        final_title = await rewrite_headline(title)
+        
+        topic_info = classify_topic(final_title)
         if topic_info["topic"] == "guide":
             steps, metrics = await extract_instructional_content(link)
-            body = format_instructional_body(title, steps) if steps else await humanize_post(source, title, educational=sensitive)
+            body = await format_instructional_body(final_title, steps) if steps else await humanize_post(source, final_title, educational=sensitive)
         else:
-            body = await humanize_post(source, title, educational=sensitive)
+            body = await humanize_post(source, final_title, educational=sensitive)
         if sensitive:
             global educational_rephrased_today
             educational_rephrased_today += 1
         hashtag = topic_info["hashtag"]
         top_bar = "🌟━━━━━━━━━━━━━━━🌟"
-        title_block = f"🔥**{(title or '').upper()}**🔥"
-        pt = get_pro_tip_for_topic(topic_info["topic"])
+        title_block = f"🔥**{(final_title or '').upper()}**🔥"
+        pt = await get_pro_tip_for_topic(topic_info["topic"])
         pro_tip_block = pt
-        add_tags = _build_tags(title)
-        base_tags = " ".join(topic_info["tags"])
-        tags_block = "#AuraApex #ApexSupreme #IPTVTech " + base_tags + ((" " + " ".join(add_tags)) if add_tags else "")
+        
+        # Build dynamic hashtags based on content
+        dynamic_tags = await _build_dynamic_tags_async(final_title, body)
+        ver_tag = " #Verified" if verified else ""
+        
+        # Assemble tag block
+        # Start with core system tags, then add verified, then dynamic ones
+        tags_block = f"#AuraApex #ApexSupreme #IPTVTech{ver_tag}"
+        if dynamic_tags:
+             tags_block += " " + " ".join(dynamic_tags)
+        
         text = f"{top_bar}\n{title_block}\n{top_bar}\n\n{body}\n\n{pro_tip_block}\n{top_bar}\n{tags_block}"
         thread_id = topic_info["thread"] or THREAD_MAP.get(hashtag) or THREAD_MAP.get("#AuraNews")
         thread_id = DYNAMIC_THREAD_MAP.get(hashtag, thread_id)
         
-        img_bytes = await generate_curator_image_async(title, body, topic_info["topic"])
+        img_bytes = await generate_curator_image_async(final_title, body, topic_info["topic"])
         
         if img_bytes:
-            fname = re.sub(r'[^A-Za-z0-9_\-]+', '_', (title or 'aura_apex'))[:60] + ".jpg"
+            fname = re.sub(r'[^A-Za-z0-9_\-]+', '_', (final_title or 'aura_apex'))[:60] + ".jpg"
             bio = io.BytesIO(img_bytes)
             try:
                 bio.name = fname
@@ -1133,7 +1802,7 @@ async def post_to_channel(client: TelegramClient, channel_id: int, source: str, 
             await client.send_message('me', f"[Curator] Posted: {link}")
         except Exception:
             pass
-        append_local_link(link)
+        await _save_dedup(title, link)
         return True
     except FloodWaitError as e:
         await asyncio.sleep(int(getattr(e, "seconds", 60)))
@@ -1152,7 +1821,7 @@ async def count_today_posts(client: TelegramClient, channel_id: int) -> int:
         for m in msgs:
             dt = getattr(m, "date", None)
             txt = (getattr(m, "text", "") or "")
-            if dt and dt.date() == today and ("Source:" in txt):
+            if dt and dt.date() == today and any(tag in txt for tag in ["#AuraApex", "#ApexSupreme"]):
                 c += 1
         return c
     except Exception:
@@ -1171,15 +1840,47 @@ async def maybe_post_soft_sale(client: TelegramClient, channel_id: int, today_co
             return False
         # Post a soft sale on every 5th curator post
         if (global_count + 1) % 5 == 0:
+            
             header = "**🛠️ #AuraFix | Skip Manual Fixes with Hardcoding**"
-            body = (
-                "Just caught this—too many guides push DNS tweaks. Fix: hardcode DNS and portal so "
-                "users stop manual patches. Aiden: hardcoding kills leakage and handshake flaps."
-            )
-            pro_tip_block = "> 💡 **Aiden’s Quick Hit:** Lock DNS in‑app; OS updates stop breaking the path."
             contact_line = "📩 @AuraApexSupport_Bot"
+            
+            # Use AI if available to generate fresh copy
+            if ai_client and _ai_allow_now():
+                try:
+                    sys_p = (
+                        "Write a 2-sentence sales hook for 'Aura Apex' (a hardcoded IPTV app). "
+                        "Pain point: Users tired of manually entering DNS/URLs. "
+                        "Solution: We hardcode it so it never breaks. "
+                        "Tone: Expert, slightly arrogant but helpful (Aiden persona). "
+                        "No hashtags."
+                    )
+                    resp = await ai_client.chat.completions.create(
+                        model="llama-3.1-8b-instant",
+                        messages=[{"role":"system", "content": sys_p}],
+                        temperature=0.8,
+                        max_tokens=100
+                    )
+                    body = (resp.choices[0].message.content or "").strip()
+                    body = _TME_SANITIZE_RE.sub('', body)
+                except Exception:
+                     body = (
+                        "Just caught this—too many guides push DNS tweaks. Fix: hardcode DNS and portal so "
+                        "users stop manual patches. Aiden: hardcoding kills leakage and handshake flaps."
+                    )
+            else:
+                 body = (
+                    "Just caught this—too many guides push DNS tweaks. Fix: hardcode DNS and portal so "
+                    "users stop manual patches. Aiden: hardcoding kills leakage and handshake flaps."
+                )
+
+            # Use AI for pro-tip too
+            pro_tip_block = await get_pro_tip_for_topic("fix")
+            if not pro_tip_block.startswith(">"):
+                pro_tip_block = f"> {pro_tip_block}"
+            
             text = f"{header}\n\n{body}\n\n{pro_tip_block}\n\n{contact_line}\n#AuraFix"
             await client.send_message(channel_id, text)
+            await _save_dedup(header, "")
             try:
                 await client.send_message('me', "[Curator] SoftSale")
             except Exception:
@@ -1188,6 +1889,47 @@ async def maybe_post_soft_sale(client: TelegramClient, channel_id: int, today_co
         return False
     except Exception:
         return False
+
+# Market Windows (Aiden Lifecycle 2026)
+def is_within_market_window(dt: datetime.datetime) -> bool:
+    """Checks if current time is within any defined market window."""
+    return get_target_topic_for_time(dt) is not None
+
+def get_target_topic_for_time(dt: datetime.datetime) -> Optional[str]:
+    """Returns the expected topic for a given local time and day of week (Aiden Lifecycle)."""
+    h = dt.hour
+    m = dt.minute
+    total_min = h * 60 + m
+    day = dt.weekday() # 0=Mon, 6=Sun
+    
+    # Mon-Fri: #AuraNews (08:30 – 10:00)
+    if 0 <= day <= 4:
+        if 510 <= total_min < 600: # 8:30 is 510m, 10:00 is 600m
+            return "news"
+            
+    # Tue/Thu: #AuraGuide (13:00 – 15:00)
+    if day in (1, 3):
+        if 780 <= total_min < 900: # 13:00 is 780m, 15:00 is 900m
+            return "guide"
+            
+    # Wed/Sat: #AuraFix (19:00 – 21:00)
+    if day in (2, 5):
+        if 1140 <= total_min < 1260: # 19:00 is 1140m, 21:00 is 1260m
+            return "fix"
+            
+    # Sun: #AuraUpdate (11:00 – 13:00)
+    if day == 6:
+        if 660 <= total_min < 780: # 11:00 is 660m, 13:00 is 780m
+            return "update"
+            
+    return None
+
+def _get_gaussian_jitter_interval() -> float:
+    base = float(CHECK_INTERVAL_SECONDS)
+    # +/- 10% jitter
+    import random
+    jitter = base * 0.1 * random.gauss(0, 1)
+    return max(60.0, base + jitter)
 
 async def curator_loop():
     from config import TARGET_CHANNEL_ID, CHANNEL_INVITE_LINK
@@ -1198,79 +1940,213 @@ async def curator_loop():
         channel_id = 0
     session = StringSession(SESSION_STRING) if SESSION_STRING else None
     client = TelegramClient(session or "aura_curator_session", int(API_ID), API_HASH)
-    async with client:
-        try:
-            client.session.save_entities = False
-        except Exception:
-            pass
+    await client.start()
+    
+    # Permissions check
+    try:
         if not channel_id and (CHANNEL_INVITE_LINK or "").strip():
             channel_id = await resolve_channel_id(client, CHANNEL_INVITE_LINK.strip())
             if not channel_id:
                 logger.error("Error: Unable to resolve channel ID from invite link.")
                 return
-        # Permissions check
+        
+        # Ensure we have admin rights
         admin_ok = await has_admin_rights(client, channel_id)
         if not admin_ok:
             logger.warning("Warning: Bot may lack admin rights; pinning may fail.")
-        await ensure_welcome_message(client, channel_id)
+            
+        # Load forum topics map
         try:
             tm = await load_forum_thread_map(client, channel_id)
             if tm:
                 DYNAMIC_THREAD_MAP.update(tm)
         except Exception:
             pass
-        seen = await load_recent_links(client, channel_id)
-        seen |= load_local_links()
+            
+        # Initial load of dedup cache
+        _load_dedup()
+        
+        last_hb = time.time()
+        
+        # Start background sentinel
+        asyncio.create_task(dead_link_sentinel(client, channel_id))
+        
         while True:
             try:
                 today_count = await count_today_posts(client, channel_id)
                 global_count = await total_curator_posts_logged(client)
-                if today_count < 3 or os.environ.get("AURA_MODE", "").lower() == "testing":
+                testing_mode = os.environ.get("AURA_MODE", "").lower() == "testing"
+                
+                # Determine current market window
+                tz = _curator_tzinfo()
+                now = datetime.datetime.now(tz)
+                target_topic = get_target_topic_for_time(now)
+                in_window = is_within_market_window(now)
+                
+                if testing_mode:
+                    logger.info(f"TESTING MODE: Ignoring schedule. Target topic: {target_topic} (but ignored)")
+                    target_topic = None 
+                else:
+                    logger.info(f"Curator status: {now.strftime('%H:%M')} {tz.key}. Market window: {in_window}. Target: {target_topic}")
+                
+                # If we are in production and OUTSIDE any window, we should skip posting unless it's a critical update
+                if not testing_mode and not in_window:
+                     # We still scrape because updates can happen anytime
+                     pass
+
+                if today_count < 3 or testing_mode:
+                    sources = [
+                        ("TROYPOINT", scrape_troypoint),
+                        ("IPTVWire", scrape_iptvwire),
+                        ("Guru99", scrape_guru99),
+                        ("AFTVnews", scrape_aftvnews),
+                        ("TorrentFreak", scrape_torrentfreak),
+                        ("Reddit r/DetailedIPTV", scrape_reddit_detailediptv),
+                        ("Reddit r/TiviMate", scrape_reddit_tivimate),
+                        ("Reddit r/IPTV", scrape_reddit_iptv),
+                    ]
+                    enabled = set((CONFIG_RULES.get("ENABLED_SOURCES") or []))
+                    if enabled:
+                        sources = [s for s in sources if s[0] in enabled]
+                        
+                    tasks = [ _run_source(name, func) for name, func in sources ]
+                    results = await asyncio.gather(*tasks, return_exceptions=False)
+                    
                     new_items = []
-                    new_items.extend(await scrape_troypoint())
-                    new_items.extend(await scrape_iptvwire())
-                    new_items.extend(await scrape_guru99())
-                    new_items.extend(await scrape_aftvnews())
-                    new_items.extend(await scrape_torrentfreak())
-                    new_items.extend(await scrape_reddit_detailediptv())
-                    new_items.extend(await scrape_reddit_tivimate())
-                    new_items.extend(await scrape_reddit_iptv())
+                    for arr in results:
+                        if arr:
+                            new_items.extend(arr)
+                            
+                    # Dedup
+                    filtered = []
+                    for t, l, s in new_items:
+                        try:
+                            if _is_duplicate(t, l, 0.90):
+                                continue
+                        except Exception:
+                            pass
+                        filtered.append((t, l, s))
+                    new_items = filtered
+                    
+                    # Sort high value first
                     hv = [it for it in new_items if is_high_value_topic(it[0])]
                     rest = [it for it in new_items if not is_high_value_topic(it[0])]
                     new_items = hv + rest
-                    def target_topic_now() -> str | None:
-                        d = datetime.datetime.now()
-                        h = d.hour
-                        wd = d.weekday()
-                        if 6 <= h <= 11:
-                            return "news"
-                        if 12 <= h <= 15 and wd in (0, 2, 4):
-                            return "guide"
-                        if 18 <= h <= 22:
-                            return "fix"
-                        return None
-                    target = target_topic_now()
+                    
                     for title, link, source in new_items:
-                        if today_count >= 3:
+                        if today_count >= 3 and not testing_mode:
                             break
-                        if link in seen and os.environ.get("AURA_MODE", "").lower() != "testing":
+                            
+                        if _is_duplicate(title, link, 0.90):
                             continue
-                        if target and os.environ.get("AURA_MODE", "").lower() != "testing":
-                            ci = classify_topic(title)
-                            if ci["topic"] != target:
+                            
+                        # Topic Classification
+                        # We rewrite headline first to get accurate topic
+                        # But wait, rewriting is async and costly. Maybe classify raw title first?
+                        # classify_topic is local regex.
+                        
+                        raw_topic_info = classify_topic(title)
+                        is_update = "update" in raw_topic_info["topic"] or "release" in title.lower() or "patch" in title.lower()
+                        
+                        if not testing_mode:
+                            # If it's an update, allowed anytime
+                            if is_update:
+                                pass 
+                            elif target_topic:
+                                # If we are in a window, ONLY allow that topic
+                                # But raw classification might be "news" for a guide.
+                                # Let's trust the classification.
+                                if raw_topic_info["topic"] != target_topic:
+                                    continue
+                            else:
+                                # Outside windows, and not an update -> Skip
                                 continue
+                        
+                        # Post it
                         ok = await post_to_channel(client, channel_id, source, title, link)
                         if ok:
-                            seen.add(link)
                             today_count += 1
                             global_count += 1
-                # Attempt soft-sale if eligible and under daily cap
-                await maybe_post_soft_sale(client, channel_id, today_count, global_count)
+                            
+        # Soft Sale Logic
+        # We also dedup soft sales by content type
+        header = "**🛠️ #AuraFix | Skip Manual Fixes with Hardcoding**"
+        if not _is_duplicate(header, "", 0.90):
+            await maybe_post_soft_sale(client, channel_id, today_count, global_count)
+                
+                # Daily Audit
                 await maybe_send_daily_audit(client)
-                await asyncio.sleep(CHECK_INTERVAL_SECONDS)
-            except Exception:
+                
+                # Heartbeat
+                if (time.time() - last_hb) >= 3600:
+                    try:
+                        logger.info(f"Curator heartbeat: Metrics={_SOURCE_METRICS}")
+                        hb = (os.environ.get("CURATOR_HEARTBEAT_DM", "").strip().lower() in ("1", "true", "yes"))
+                        if hb:
+                            summary = "All Systems Nominal"
+                            if _SOURCE_METRICS:
+                                details = "; ".join([f"{n}: {m.get('success',0)}/{m.get('attempts',0)}" for n, m in _SOURCE_METRICS.items()])
+                                summary = f"{summary}\n\n{details}"
+                            await client.send_message('me', f"[Curator] {summary}")
+                    except Exception as e:
+                        logger.error(f"Heartbeat report error: {e}")
+                    last_hb = time.time()
+                
+                # Sleep with Jitter
+                sleep_sec = _get_gaussian_jitter_interval()
+                await asyncio.sleep(sleep_sec)
+                
+            except Exception as e:
+                logger.error(f"Curator Loop Error: {e}")
                 await asyncio.sleep(300)
+    except Exception as e:
+        logger.critical(f"Curator Critical Failure: {e}")
 
+async def dead_link_sentinel(client: TelegramClient, channel_id: int):
+    while True:
+        try:
+            p = os.path.join("data", "posted_links.jsonl")
+            if not os.path.exists(p):
+                await asyncio.sleep(21600)
+                continue
+            cutoff = int(time.time()) - 30 * 86400
+            to_check: List[str] = []
+            seen = set()
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            rec = json.loads(line)
+                            ln = str(rec.get("link","")).strip()
+                            ts = int(rec.get("ts", 0))
+                            if ln and ts <= cutoff and ln not in seen:
+                                to_check.append(ln)
+                                seen.add(ln)
+                        except Exception:
+                            continue
+            except Exception:
+                to_check = []
+            for ln in to_check[:10]:
+                try:
+                    ok = False
+                    try:
+                        session = await get_session()
+                        async with session.head(ln, timeout=10) as r:
+                            ok = (200 <= r.status < 400)
+                    except Exception:
+                        ok = False
+                    if not ok:
+                        msg = "Update: Source link is down, checking for mirrors."
+                        try:
+                            await client.send_message(channel_id, msg)
+                        except Exception:
+                            pass
+                    await asyncio.sleep(1.0)
+                except Exception:
+                    continue
+            await asyncio.sleep(21600)
+        except Exception:
+            await asyncio.sleep(21600)
 def extract_invite_hash(invite_link: str) -> str:
     if not invite_link:
         return ""
@@ -1338,11 +2214,10 @@ def assign_group_hashtag(title: str) -> str:
         return "#AuraUpdate"
     if any(k in t for k in ["setup", "tutorial", "how to", "install", "configure", "guide"]):
         return "#AuraGuide"
-    if any(k in t for k in ["rebrand", "white label", "hardcoded dns", "showcase", "branding", "demo"]):
-        return "#AuraDemo"
     if any(k in t for k in ["iptv", "industry", "news", "policy", "legal", "crackdown", "piracy"]):
         return "#AuraNews"
     return "#AuraNews"
 
 if __name__ == "__main__":
+    validate_curator_env()
     asyncio.run(curator_loop())

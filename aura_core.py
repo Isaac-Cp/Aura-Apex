@@ -221,6 +221,21 @@ def load_json(path: str, default: Any) -> Any:
                 return default
     except Exception:
         pass
+    # Skip legacy JSON file reads for migrated stores
+    name = os.path.basename(path or "")
+    MIGRATED = {
+        "supreme_stats.json",
+        "supreme_groups.json",
+        "prospect_catalog.json",
+        "source_kpis.json",
+        "join_attempts.json",
+        "potential_targets.json",
+        "cached_invites.json",
+        "entity_cache.json",
+        "resolve_cooldowns.json",
+    }
+    if name in MIGRATED:
+        return default
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -461,10 +476,25 @@ from config import (
     COMPETITOR_KEYWORDS, NEGATIVE_TRIGGERS
 )
 
+# Compiled Regex for performance
+_REBRAND_RE = re.compile(rf"\b({'|'.join(re.escape(w) for w in REBRAND_KEYWORDS)})\b", re.I) if REBRAND_KEYWORDS else None
+_URGENCY_RE = re.compile(rf"\b({'|'.join(re.escape(w) for w in URGENCY_KEYWORDS)})\b", re.I) if URGENCY_KEYWORDS else None
+_COMPETITOR_RE = re.compile(rf"\b({'|'.join(re.escape(w) for w in COMPETITOR_KEYWORDS)})\b", re.I) if COMPETITOR_KEYWORDS else None
+_COMMERCIAL_RE = re.compile(rf"\b({'|'.join(re.escape(w) for w in COMMERCIAL_KEYWORDS)})\b", re.I) if COMMERCIAL_KEYWORDS else None
+_NEGATIVE_RE = re.compile(rf"\b({'|'.join(re.escape(w) for w in NEGATIVE_TRIGGERS)})\b", re.I) if NEGATIVE_TRIGGERS else None
+
+_SELLER_TERMS = [
+    "dm for", "dm me", "contact me", "reseller", "panel", "credits", "wholesale", 
+    "supplier", "official", "whatsapp", "join my", "test available", "free trial",
+    "all channels", "premium iptv", "stable service", "bouquet", "m3u list",
+    "price list", "pricing", "subscription offer"
+]
+_SELLER_RE = re.compile(rf"({'|'.join(re.escape(w) for w in _SELLER_TERMS)})", re.I)
+
 def calculate_lead_score(message_text: Optional[str], user_data: Any) -> int:
     """
     Calculates a lead score based on keywords, user quality, and sentiment.
-    Returns an integer score.
+    Returns an integer score. Optimized with pre-compiled regex.
     """
     score = 0
     if not message_text:
@@ -472,32 +502,33 @@ def calculate_lead_score(message_text: Optional[str], user_data: Any) -> int:
     text = message_text.lower()
 
     # 1. HIGH INTENT KEYWORDS (+7 points)
-    if any(word in text for word in REBRAND_KEYWORDS):
+    if _REBRAND_RE and _REBRAND_RE.search(text):
         score += 7
 
     # 2. PAIN POINT KEYWORDS (+3 points)
-    if any(word in text for word in URGENCY_KEYWORDS):
+    if _URGENCY_RE and _URGENCY_RE.search(text):
         score += 3
 
     # 3. COMPETITOR MENTIONS (+2 points)
-    if any(word in text for word in COMPETITOR_KEYWORDS):
+    if _COMPETITOR_RE and _COMPETITOR_RE.search(text):
         score += 2
         
     # 4. COMMERCIAL INTENT (+4 points)
-    if any(word in text for word in COMMERCIAL_KEYWORDS):
+    if _COMMERCIAL_RE and _COMMERCIAL_RE.search(text):
         score += 4
 
     # 5. NEGATIVE SENTIMENT (+2 points)
-    if any(word in text for word in NEGATIVE_TRIGGERS):
+    if _NEGATIVE_RE and _NEGATIVE_RE.search(text):
         score += 2
 
-    # 6. USER QUALITY BONUSES (Multipliers)
+    # 6. SELLER/PROVIDER SIGNALS (CRITICAL DEDUCTION)
+    if _SELLER_RE.search(text):
+        score -= 20 # Decimate the score for sellers
+
+    # 7. USER QUALITY BONUSES (Multipliers)
     if user_data:
-        # Give points for having a username (shows an active/real user)
         if hasattr(user_data, 'username') and user_data.username:
             score += 2
-        
-        # Give points for being Premium (shows they have money/intent)
         if hasattr(user_data, 'premium') and user_data.premium:
             score += 3
 

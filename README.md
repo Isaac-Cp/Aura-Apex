@@ -1,40 +1,22 @@
-# Aura Apex Supreme
+# Aura Apex Ecosystem
 
-Production-ready Telegram automation suite for discovery, outreach, and content curation.
+Advanced Telegram automation for IPTV content curation and prospect outreach.
 
-## Prerequisites
-- Python 3.11+ on Windows
-- A Telegram API ID/API Hash
-- A session string or phone login
-- Optional: GROQ_API_KEY for prompt brief generation
-- Optional: IMAGE_GEN_ENDPOINT + IMAGE_GEN_API_KEY for AI image generation
+## Components
+
+- **main.py**: Process manager that keeps all bots running.
+- **aura_curator.py**: Content discovery and channel management bot.
+- **aura_apex_supreme.py**: Prospect identification and outreach bot.
+- **aura_core.py**: Shared utilities and business logic.
+- **config.py**: Configuration loader.
+- **keep_alive.py**: Web server for health checks and auth callbacks.
 
 ## Setup
-1. Create a virtual environment and install dependencies:
-   - `python -m venv .venv && .\.venv\Scripts\Activate.ps1`
-   - `pip install -r requirements.txt`
-2. Copy `.env.example` to `.env` and fill values. Do not commit `.env`.
-3. Verify syntax:
-   - `python -m py_compile aura_apex_supreme.py aura_curator.py`
 
-## Running
-- Outreach bot:
-  - `python aura_apex_supreme.py`
-  - Env flags:
-    - `STOP_OUTREACH=1` to disable DMs
-    - `RUN_PERF_40M=1` to enable 40‑minute performance monitor
-- Curator:
-  - `python -c "import asyncio; from aura_curator import curator_loop; asyncio.run(curator_loop())"`
+1. Create a `.env` file with your credentials (API_ID, API_HASH, PHONE_NUMBER, etc.).
+2. Install dependencies: `pip install -r requirements.txt`.
+3. Run the manager: `python main.py`.
 
-## Image Generation
-- Configure `IMAGE_GEN_ENDPOINT` to an HTTP API returning image bytes or JSON `{ image_base64 }`.
-- If not set, curator uses branded Pillow templates.
+## Data Storage
 
-## Safety
-- `.gitignore` excludes `.env`, logs, perf files, and image artifacts.
-- Do not commit secrets.
-
-## Commands
-- `/source_kpi` in DM to get discovery source KPI report
-- `/health` bot status
-
+All data is stored in the `data/` directory and `gold_leads.db`.
