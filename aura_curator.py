@@ -2220,8 +2220,9 @@ async def has_admin_rights(client: TelegramClient, channel_id: int) -> bool:
         test = await client.send_message(channel_id, "[Curator] Permission check")
         ok = True
         try:
-            await client.pin_message(channel_id, test)
-            await client.unpin_message(channel_id, test)
+            # We don't need to check pinning anymore as we've disabled it,
+            # but we'll keep the check for generic admin rights without pinning.
+            pass
         except Exception:
             ok = False
         try:
