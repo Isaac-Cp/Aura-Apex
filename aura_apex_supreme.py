@@ -243,7 +243,7 @@ async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_sc
             try:
                 key = (os.environ.get("GEMINI_API_KEY") or "").strip()
                 if key:
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={key}"
                     payload = {"contents":[{"parts":[{"text": local_prompt + "\n\n" + up}]}]}
                     async with aiohttp.ClientSession() as sess:
                         async with sess.post(url, json=payload, timeout=20) as r:
