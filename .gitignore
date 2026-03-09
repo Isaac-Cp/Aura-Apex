@@ -95,9 +95,41 @@ ipython_config.py
 #   platform.
 # Pipfile.lock
 
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
+# Custom Aura Bot ignores
+.env
+*.session
+*.session.bak
+*.db
+*.db-shm
+*.db-wal
+data/
+*.log
+*.json
+*.jsonl
+*.bak
+.venv/
+aura_apex_session.session
+aura_apex_supreme_session.session
+aura_apex_supreme_session.session.bak
+aura_pro_elite.session
+aura_supreme_session.session
+iptv_pro_session.session
+blacklist.txt
+bot.log
+bot_error.log
+candidate_queue.json
+cycle_kpis.jsonl
+dm_attempts.json
+full_cycle_test.log
+gold_leads.db
+gold_leads.db-shm
+gold_leads.db-wal
+kpi.json
+leads.json
+rejected_groups.json
+perf_samples.jsonl
+perf_report.md
+cleanup_report.md
 # poetry.lock
 
 # pdm

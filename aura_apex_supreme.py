@@ -294,8 +294,9 @@ def _recent_dm_block(items: list, uid: str) -> bool:
 
 async def safe_send_dm(client: Any, peer: Any, message: str, tzinfo: Any = None) -> bool:
     logs = await _load_dm_log_async()
+    me = await client.get_me()
     uid = str(getattr(peer, "user_id", getattr(peer, "id", peer)))
-    if not uid:
+    if not uid or str(uid) == str(me.id):
         return False
     # Peer-based limit: avoid multiple DMs to same user in a short window
     try:
@@ -332,17 +333,28 @@ async def safe_send_dm(client: Any, peer: Any, message: str, tzinfo: Any = None)
         logs.append({"ts": _now_ts(), "peer_id": uid, "status": "skipped", "reason": "quiet_hours"})
         await _save_dm_log_async(logs)
         return False
+    
+    # Check persistent deep sleep
+    if outreach_deep_sleep():
+        logs.append({"ts": _now_ts(), "peer_id": uid, "status": "skipped", "reason": "deep_sleep"})
+        await _save_dm_log_async(logs)
+        return False
+
     try:
-        est = max(2.0, min(12.0, len(message) * 0.05))
+        est = max(3.0, min(15.0, len(message) * 0.08))
         start = time.time()
         while (time.time() - start) < est:
             try:
                 await client.send_chat_action(peer, 'typing')
             except Exception:
                 break
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(3.0)
     except Exception as e:
         logger.debug(f"Typing variation error: {e}")
+    
+    # Extra pause before send to mimic human deliberation
+    await asyncio.sleep(random.uniform(2, 5))
+
     tries = 0
     while tries < 2:
         try:
@@ -356,7 +368,7 @@ async def safe_send_dm(client: Any, peer: Any, message: str, tzinfo: Any = None)
             return False
         except PeerFloodError:
             try:
-                activate_deep_sleep(12 * 3600)
+                await activate_deep_sleep(12 * 3600)
                 logs.append({"ts": _now_ts(), "peer_id": uid, "status": "error", "reason": "peer_flood_deep_sleep"})
                 await _save_dm_log_async(logs)
             except Exception:
@@ -1498,34 +1510,62 @@ USER_BLACKLIST_STRINGS = [
     'provider', 'seller', 'sales', 'official', 'hosting', 'server', 'manager', 'direct'
 ]
 def _user_entity_audit(user):
+    """
+    Returns True if user is a bot or provider.
+    """
     try:
-        uname = None
-        bio = None
         if user is None:
             return False
+            
+        # 1. Explicit Bot Check (Telegram API attribute)
+        if getattr(user, "bot", False) or getattr(getattr(user, "user", None), "bot", False):
+            return True
+            
+        # 2. Extract Username and Bio
+        uname = None
+        bio = None
         try:
+            # Handle cases where 'user' might be a Telethon User object or a wrapper
             uname = getattr(user, "username", None) or getattr(getattr(user, "user", None), "username", None)
         except Exception:
             uname = None
+            
         try:
-            # FullUser about field
+            # FullUser about field or regular bio
             bio = getattr(user, "about", None)
             if not bio and hasattr(user, "full_user"):
                 bio = getattr(user.full_user, "about", None)
+            if not bio and hasattr(user, "user"):
+                bio = getattr(getattr(user, "user", None), "about", None)
         except Exception:
             bio = None
             
         u = (uname or "").lower()
         b = (bio or "").lower()
+        first_name = (getattr(user, "first_name", "") or getattr(getattr(user, "user", None), "first_name", "") or "").lower()
+        last_name = (getattr(user, "last_name", "") or getattr(getattr(user, "user", None), "last_name", "") or "").lower()
         
-        # Check for provider signals in username or bio
+        # 3. Pattern Matching (Bot Keywords)
+        # Telegram bots MUST end in 'bot' in their username
+        if u.endswith("bot"):
+            return True
+            
+        # Common Bot name patterns (more specific to avoid false positives)
+        bot_indicators = ["bot", "keeper", "admin", "helper", "service", "support", "official"]
+        # If 'bot' is a standalone word in name or part of bot-like username
+        if "bot" in u.split("_") or "bot" in u.split("-"):
+            return True
+        if any(f" {p}" in f" {first_name} {last_name}" for p in ["bot", "keeper", "helper"]):
+            return True
+
+        # 4. Blacklisted Strings (Providers/Admins)
         if any(k in u for k in USER_BLACKLIST_STRINGS):
             return True
         if any(k in b for k in USER_BLACKLIST_STRINGS):
             return True
             
-        # Common provider naming patterns
-        if u.endswith("_iptv") or u.endswith("_bot") or u.startswith("iptv_"):
+        # 5. Common Provider Naming Patterns
+        if u.endswith("_iptv") or u.startswith("iptv_"):
             return True
         if "t.me/" in b: # Providers often link to their channels/bots in bio
             return True
@@ -1556,12 +1596,17 @@ def marketing_sentiment_score(text):
         score = 100
     return score
 def evaluate_lead_message(text, user=None):
-    if os.environ.get("AURA_MODE", "").lower() == "testing":
-        return "PROCEED"
+    # 1. ALWAYS Reject Bots and Providers (even in testing)
     if _user_entity_audit(user):
         return "REJECT"
     if _provider_advertising(text):
         return "REJECT"
+        
+    # 2. Testing Mode Bypass for Sentiment
+    if os.environ.get("AURA_MODE", "").lower() == "testing":
+        return "PROCEED"
+        
+    # 3. Regular Logic
     if _frustrated_user(text):
         return "PROCEED"
     ms = marketing_sentiment_score(text)
@@ -3261,6 +3306,9 @@ async def handshake_processor():
                         stats = await load_json_async(STATS_FILE, apex_supreme_stats)
                         dm_today = stats.get("dm_initiated_today", 0)
                         me = await client.get_me()
+                        if u == me.id:
+                            logger.info(f"Skipping DM to {u} (Self-DM check).")
+                            continue
                         is_premium = bool(getattr(me, "premium", False))
                         cap = 25 if is_premium else 10
                         cap = min(cap, 75)
@@ -3394,6 +3442,7 @@ async def handshake_processor():
                                 h = datetime.datetime.now(tz).hour
                                 logger.info(f"Skipping DM to {u} (Outside human hours: {h}:00 in {tz.key}).")
                                 continue
+                            
                             await client.send_read_acknowledge(u)
                             await asyncio.sleep(random.randint(5, 10) if os.environ.get("AURA_MODE", "").lower() == "testing" else random.randint(300, 420))
                             sent = await safe_send_dm(client, u, dm_text)
@@ -3439,20 +3488,50 @@ async def typing_heartbeat(entity, duration=6.0):
 
 # Deep sleep control for PeerFloodError events
 _deep_sleep_until = 0.0
-def activate_deep_sleep(seconds: int):
+
+async def _load_persistent_deep_sleep():
+    global _deep_sleep_until
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute("SELECT val FROM kv_store WHERE key = 'deep_sleep_until'") as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    _deep_sleep_until = float(row[0])
+    except Exception:
+        pass
+
+async def activate_deep_sleep(seconds: int):
     global _deep_sleep_until
     # Reduce deep sleep in testing mode for faster debugging, but still block floods
     if os.environ.get("AURA_MODE", "").lower() == "testing":
         seconds = min(seconds, 300) # Max 5 mins in testing
-    _deep_sleep_until = max(_deep_sleep_until, time.time() + max(0, seconds))
+    
+    new_ts = time.time() + max(0, seconds)
+    _deep_sleep_until = max(_deep_sleep_until, new_ts)
+    
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute("INSERT OR REPLACE INTO kv_store (key, val) VALUES ('deep_sleep_until', ?)", (str(_deep_sleep_until),))
+            await db.commit()
+    except Exception as e:
+        logger.debug(f"Failed to save deep sleep: {e}")
+
 def outreach_deep_sleep() -> bool:
     return time.time() < _deep_sleep_until
 def quality_gate(full_user):
     try:
-        if os.environ.get("AURA_MODE", "").lower() == "testing":
-            return True
         usr = getattr(full_user, "user", None)
         fu = getattr(full_user, "full_user", None)
+        
+        # 1. ALWAYS Reject Bots and Providers
+        if _user_entity_audit(usr or fu):
+            return False
+            
+        # 2. Testing Mode Bypass for Activity/Photos
+        if os.environ.get("AURA_MODE", "").lower() == "testing":
+            return True
+            
+        # 3. Photo Check
         photo = False
         try:
             photo = bool(getattr(usr, "photo", None) or getattr(fu, "profile_photo", None))
@@ -3460,16 +3539,21 @@ def quality_gate(full_user):
             photo = False
         if not photo:
             return False
+            
+        # 4. Status/Activity Check
         st = None
         try:
             st = getattr(usr, "status", None) or getattr(fu, "status", None)
         except Exception:
             st = None
+            
         if isinstance(st, types.UserStatusEmpty):
             return False
+            
         now_ts = datetime.datetime.now(datetime.timezone.utc)
         if isinstance(st, (UserStatusOnline, UserStatusRecently)):
             return True
+            
         if isinstance(st, UserStatusOffline):
             dt = getattr(st, "was_online", None)
             if dt:

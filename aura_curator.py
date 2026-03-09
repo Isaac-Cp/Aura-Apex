@@ -1,4 +1,4 @@
-from typing import List, Tuple, Dict, Optional, Any, Union
+from typing import List, Tuple, Dict, Optional, Any, Union, Set
 import asyncio
 import os
 import re
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 from bs4 import BeautifulSoup
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.errors import FloodWaitError, PeerFloodError, ChatWriteForbiddenError, ChannelPrivateError
+from telethon.errors import FloodWaitError, PeerFloodError, ChatWriteForbiddenError, ChannelPrivateError, UserAlreadyParticipantError
 from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
 # Forum topic APIs vary across Telethon versions; dynamic mapping disabled for compatibility
 from groq import AsyncGroq
@@ -566,7 +566,7 @@ async def _build_image_prompt(title: str, body: str, topic: str) -> str:
 
 async def _ai_generate_image(prompt: str, size: Tuple[int, int] = (1280, 720)) -> Optional[bytes]:
     try:
-        if not IMAGE_GEN_ENDPOINT:
+        if not IMAGE_GEN_ENDPOINT or not IMAGE_GEN_API_KEY:
             return None
         
         # Determine provider based on endpoint or env var
@@ -574,11 +574,8 @@ async def _ai_generate_image(prompt: str, size: Tuple[int, int] = (1280, 720)) -
         
         if is_stability:
             # Stability AI Format (SDXL)
-            # Supported dimensions: 1024x1024, 1152x896, 1216x832, 1344x768, 1536x640, 640x1536, 768x1344, 832x1216, 896x1152
-            # We want 16:9ish, so 1344x768 is the closest valid SDXL resolution.
             width = 1344
             height = 768
-            
             payload = {
                 "text_prompts": [{"text": prompt}],
                 "cfg_scale": 7,
@@ -588,15 +585,13 @@ async def _ai_generate_image(prompt: str, size: Tuple[int, int] = (1280, 720)) -
                 "steps": 30,
             }
         else:
-            # Generic/Default Format
             payload = {"prompt": prompt, "model": IMAGE_GEN_MODEL, "width": size[0], "height": size[1]}
             
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        if is_stability:
-            headers["Accept"] = "image/png" # Request raw bytes directly
-            
-        if IMAGE_GEN_API_KEY:
-            headers["Authorization"] = f"Bearer {IMAGE_GEN_API_KEY}"
+        headers = {
+            "Content-Type": "application/json", 
+            "Accept": "image/png" if is_stability else "application/json",
+            "Authorization": f"Bearer {IMAGE_GEN_API_KEY}"
+        }
             
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
         async with aiohttp.ClientSession(headers=headers) as session:
@@ -605,14 +600,12 @@ async def _ai_generate_image(prompt: str, size: Tuple[int, int] = (1280, 720)) -
                     async with session.post(IMAGE_GEN_ENDPOINT, json=payload, timeout=60, ssl=ssl_ctx) as r:
                         if r.status == 200:
                             ct = r.headers.get("Content-Type", "")
-                            # Stability AI returns raw image bytes if Accept: image/png
                             if "image" in ct:
                                 raw = await r.read()
                                 return raw if raw else None
                             elif "application/json" in ct:
                                 data = await r.json()
-                                # Handle various JSON response formats
-                                if "artifacts" in data: # Stability AI JSON format
+                                if "artifacts" in data:
                                     b64 = data["artifacts"][0].get("base64")
                                 else:
                                     b64 = (data.get("image_base64") or "").strip()
@@ -620,10 +613,12 @@ async def _ai_generate_image(prompt: str, size: Tuple[int, int] = (1280, 720)) -
                                 if not b64:
                                     return None
                                 import base64
-                                raw = base64.b64decode(b64)
-                                return raw
+                                return base64.b64decode(b64)
+                        elif r.status == 429 or r.status == 402:
+                            # 429 = Rate Limit, 402 = Payment Required (Insufficient Balance)
+                            logger.warning(f"Stability AI {r.status}: Insufficient balance or rate limit. Skipping AI image.")
+                            return None
                         else:
-                            # Log error for debugging
                             try:
                                 err_text = await r.text()
                                 logger.error(f"Stability AI Error {r.status}: {err_text}")
@@ -1882,12 +1877,13 @@ async def maybe_post_soft_sale(client: TelegramClient, channel_id: int, today_co
             await client.send_message(channel_id, text)
             await _save_dedup(header, "")
             try:
-                await client.send_message('me', "[Curator] SoftSale")
+                await client.send_message('me', f"[Curator] Soft Sale Posted")
             except Exception:
                 pass
             return True
         return False
-    except Exception:
+    except Exception as e:
+        logger.error(f"Soft sale post failed: {e}")
         return False
 
 # Market Windows (Aiden Lifecycle 2026)
@@ -2073,7 +2069,7 @@ async def curator_loop():
                 # Heartbeat
                 if (time.time() - last_hb) >= 3600:
                     try:
-                        logger.info(f"Curator heartbeat: Metrics={_SOURCE_METRICS}")
+                        logger.info(f"Curator heartbeat ok")
                         hb = (os.environ.get("CURATOR_HEARTBEAT_DM", "").strip().lower() in ("1", "true", "yes"))
                         if hb:
                             summary = "All Systems Nominal"
@@ -2153,12 +2149,11 @@ def extract_invite_hash(invite_link: str) -> str:
 
 async def resolve_channel_id(client: TelegramClient, invite_link: str) -> int:
     try:
+        from telethon import utils
         # First try direct entity resolution (works if already a member)
         try:
             ent = await client.get_entity(invite_link)
-            cid = int(getattr(ent, "id", 0) or 0)
-            if cid:
-                return cid
+            return utils.get_peer_id(ent)
         except Exception:
             pass
         # Fallback: use invite hash to join and read id
@@ -2166,16 +2161,29 @@ async def resolve_channel_id(client: TelegramClient, invite_link: str) -> int:
         if not h:
             return 0
         try:
-            await client(CheckChatInviteRequest(h))
+            invite = await client(CheckChatInviteRequest(h))
+            # ChatInviteAlready or ChatInvite
+            if hasattr(invite, "chat"):
+                return utils.get_peer_id(invite.chat)
         except Exception:
             pass
-        res = await client(ImportChatInviteRequest(h))
-        chats = getattr(res, "chats", []) or []
-        if chats:
-            chat = chats[0]
-            cid = int(getattr(chat, "id", 0) or 0)
-            if cid:
-                return cid
+            
+        try:
+            res = await client(ImportChatInviteRequest(h))
+            chats = getattr(res, "chats", []) or []
+            if chats:
+                return utils.get_peer_id(chats[0])
+        except UserAlreadyParticipantError:
+            # If we are already a participant, we can search the dialogs for this channel
+            # but that's slow. Let's try to get entity from hash
+            try:
+                # Some invite links resolve directly to channel if we are members
+                ent = await client.get_entity(invite_link)
+                return utils.get_peer_id(ent)
+            except Exception:
+                pass
+        except Exception:
+            pass
         return 0
     except Exception:
         return 0

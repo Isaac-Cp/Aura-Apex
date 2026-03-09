@@ -431,6 +431,16 @@ async def clean_old_logs_async(db_path: str, days: int = 7) -> None:
 
 def calculate_lead_score(text: str, user: Any = None) -> int:
     try:
+        # 1. BOT CHECK (Hard Reject)
+        if user:
+            is_bot = getattr(user, "bot", False)
+            uname = (getattr(user, "username", "") or "").lower()
+            fname = (getattr(user, "first_name", "") or "").lower()
+            lname = (getattr(user, "last_name", "") or "").lower()
+            
+            if is_bot or any(k in uname for k in ["bot", "keeper"]) or any(k in fname for k in ["bot", "keeper"]):
+                return -100 # Definitely a bot
+        
         score = 0
         t = (text or "").lower()
         
