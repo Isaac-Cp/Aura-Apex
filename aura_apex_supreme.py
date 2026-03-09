@@ -3256,17 +3256,8 @@ async def handshake_processor():
                                 "username": u_name
                             }
             
-            cpu = None
-            try:
-                import psutil
-                cpu = psutil.cpu_percent(interval=0.2)
-            except Exception:
-                cpu = None
             now = time.time()
             logger.info(f"Handshake queue size: {len(queued_handshakes)}")
-            if queued_handshakes:
-                next_due = min(data["due"] for data in queued_handshakes.values())
-                logger.info(f"Next handshake due in {max(0, int(next_due - now))} seconds.")
             
             # Copy keys to avoid RuntimeError during iteration
             to_process = [u for u, data in queued_handshakes.items() if data["due"] <= now]
@@ -3297,6 +3288,143 @@ async def handshake_processor():
                     try:
                         if await user_opted_out(u):
                             logger.info("Skipping DM (user opted out).")
+                            continue
+                        if not market_hour_ok() and os.environ.get("AURA_MODE", "").lower() != "testing":
+                            tz = _market_tzinfo()
+                            h = datetime.datetime.now(tz).hour
+                            logger.info(f"Skipping DM to {u} (Outside human hours: {h}:00 in {tz.key}).")
+                            continue
+                        stats = await load_json_async(STATS_FILE, apex_supreme_stats)
+                        dm_today = stats.get("dm_initiated_today", 0)
+                        me = await client.get_me()
+                        if u == me.id:
+                            logger.info(f"Skipping DM to {u} (Self-DM check).")
+                            continue
+                        is_premium = bool(getattr(me, "premium", False))
+                        cap = 25 if is_premium else 10
+                        cap = min(cap, 75)
+                        if dm_today >= cap:
+                            logger.info(f"DM cap reached ({dm_today}/{cap}).")
+                            continue
+                        cached_username = data.get("username")
+                        uname = cached_username # Ensure uname is defined before any possible exception
+                        try:
+                            # Try resolving by username if available, then by ID
+                            user_obj = None
+                            if cached_username:
+                                try:
+                                    user_obj = await client.get_entity(cached_username)
+                                except Exception:
+                                    pass
+                            
+                            if not user_obj:
+                                try:
+                                    # Fetching the message itself from the group to populate the cache
+                                    if chat_id and msg_id:
+                                        m = await client.get_messages(chat_id, ids=msg_id)
+                                        if m and m.sender:
+                                            user_obj = m.sender
+                                    
+                                    if not user_obj:
+                                        user_obj = await client.get_entity(u)
+                                except Exception as e:
+                                    logger.debug(f"Entity resolution failed for {u}: {e}")
+                                    # Fallback to direct resolution via full user if possible
+                                    try:
+                                        fu = await client(GetFullUserRequest(u))
+                                        user_obj = getattr(fu, "user", None)
+                                    except Exception as e2:
+                                        logger.error(f"Failed all resolution paths for {u}: {e2}")
+                                        continue
+
+                            # For quality gate, we still need full user info
+                            fu = await client(GetFullUserRequest(user_obj))
+                            uname = getattr(user_obj, "username", None) or cached_username
+                            # RELAXATION: Even if no username, if we have a valid user object from cache/ID, try to DM
+                            if not uname and os.environ.get("AURA_MODE", "").lower() != "testing":
+                                logger.info(f"Skipping DM to {u} (no username).")
+                                continue
+                            lead_premium = bool(getattr(user_obj, "premium", False))
+                        except (UserPrivacyRestrictedError, PeerIdInvalidError) as e:
+                            logger.info(f"Skipping DM to {u} (privacy or invalid peer): {e}")
+                            continue
+                        except Exception as e:
+                            # Final resolution attempt if previous failed
+                            if cached_username:
+                                try:
+                                    ent = await client.get_input_entity(cached_username)
+                                    fu = await client(GetFullUserRequest(ent))
+                                    user_obj = getattr(fu, "user", None)
+                                    uname = getattr(user_obj, "username", None) or cached_username
+                                    lead_premium = bool(getattr(user_obj, "premium", False))
+                                except Exception as e2:
+                                    logger.error(f"Failed to resolve {u} even with username {cached_username}: {e2}")
+                                    continue
+                            else:
+                                logger.error(f"Resolution error for {u}: {e}")
+                                continue
+                        if not quality_gate(fu):
+                            logger.info(f"Skipping DM to {u} (Failed Quality Gate: No photo or long offline).")
+                            continue
+                        social_hint = ""
+                        try:
+                            recent = await client.get_messages(chat_id, limit=10)
+                            problems = ["black screen", "buffering", "down", "looping", "expired"]
+                            competitor = ["apollo", "xtream", "stb", "mag"]
+                            if any(m.text and any(p in m.text.lower() for p in problems) for m in recent):
+                                social_hint = "Noticed others mentioning black screens and buffering today."
+                            elif any(m.text and any(c in m.text.lower() for c in competitor) for m in recent):
+                                social_hint = "Saw chatter about apollo/xtream issues in the group."
+                        except Exception:
+                            pass
+                        if outreach_deep_sleep():
+                            logger.info("Skipping DM (deep sleep active).")
+                            continue
+                        await typing_heartbeat(u, random.uniform(6, 9))
+                        dm_text = None
+                        persona_id = await get_prospect_persona(u, chat_id) or choose_persona_id(group_title)
+                        try:
+                            lead_score = 0
+                            try:
+                                lead_score = calculate_lead_score(snippet or "", None)
+                            except Exception:
+                                pass
+                            dm_text = await generate_outreach_dm(u, snippet or "", group_title, persona_id, lead_score, lead_premium, social_hint)
+                        except Exception as e:
+                            logger.error(f"AI DM generation failed for {u}: {e}")
+                            dm_text = get_fallback_dm(persona_id)
+                        
+                        if dm_text:
+                            try:
+                                await client.send_message(u, dm_text)
+                                update_prospect_status(u, "contacted")
+                                log_activity("dm_sent", f"{u}:{persona_id}")
+                                
+                                # Global DM tracking
+                                stats = await load_json_async(STATS_FILE, apex_supreme_stats)
+                                stats["dm_initiated_today"] = stats.get("dm_initiated_today", 0) + 1
+                                stats["unique_dms"] = stats.get("unique_dms", 0) + 1
+                                await save_json_async(STATS_FILE, stats)
+                                
+                                # Human-like delay after successful DM
+                                await asyncio.sleep(random.uniform(45, 90))
+                            except Exception as e:
+                                logger.error(f"Failed to send DM to {u}: {e}")
+                    except Exception as e:
+                        logger.error(f"Handshake Processor item error: {e}")
+
+            if queued_handshakes:
+                next_due = min(data["due"] for data in queued_handshakes.values())
+                sleep_time = max(10, int(next_due - now))
+                logger.info(f"Handshake Processor sleeping for {sleep_time}s until next due.")
+                await asyncio.sleep(sleep_time)
+            else:
+                sleep_time = random.randint(30, 60) if os.environ.get("AURA_MODE", "").lower() == "testing" else random.randint(300, 600)
+                logger.info(f"Handshake queue empty. Sleeping for {sleep_time}s...")
+                await asyncio.sleep(sleep_time)
+        except Exception as e:
+            logger.error(f"Handshake processor error: {e}")
+            await asyncio.sleep(60)
                             continue
                         if not market_hour_ok() and os.environ.get("AURA_MODE", "").lower() != "testing":
                             tz = _market_tzinfo()

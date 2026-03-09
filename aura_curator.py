@@ -1922,6 +1922,8 @@ def get_target_topic_for_time(dt: datetime.datetime) -> Optional[str]:
 
 def _get_gaussian_jitter_interval() -> float:
     base = float(CHECK_INTERVAL_SECONDS)
+    if os.environ.get("AURA_MODE", "").lower() == "production":
+        base = max(base, 900.0) # 15 min minimum in prod
     # +/- 10% jitter
     import random
     jitter = base * 0.1 * random.gauss(0, 1)
