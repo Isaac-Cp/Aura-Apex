@@ -1856,7 +1856,8 @@ async def total_curator_posts_logged(client: TelegramClient) -> int:
 
 async def maybe_post_soft_sale(client: TelegramClient, channel_id: int, today_count: int, global_count: int) -> bool:
     try:
-        if today_count >= 3:
+        # Limit to 1 post per day in production
+        if today_count >= 1 and os.environ.get("AURA_MODE", "").lower() != "testing":
             return False
         # Post a soft sale on every 5th curator post
         if (global_count + 1) % 5 == 0:
@@ -2017,7 +2018,7 @@ async def curator_loop():
                      # We still scrape because updates can happen anytime
                      pass
 
-                if today_count < 3 or testing_mode:
+                if today_count < 1 or testing_mode:
                     sources = [
                         ("TROYPOINT", scrape_troypoint),
                         ("IPTVWire", scrape_iptvwire),
@@ -2058,7 +2059,8 @@ async def curator_loop():
                     new_items = hv + rest
                     
                     for title, link, source in new_items:
-                        if today_count >= 3 and not testing_mode:
+                        # Only post once per day when in production mode
+                        if today_count >= 1 and not testing_mode:
                             break
                             
                         if _is_duplicate(title, link, 0.90):
