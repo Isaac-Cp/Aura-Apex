@@ -3406,10 +3406,19 @@ async def handshake_processor():
                                 lead_score = calculate_lead_score(snippet or "", None)
                             except Exception:
                                 pass
-                            dm_text = await generate_outreach_dm(u, snippet or "", group_title, persona_id, lead_score, lead_premium, social_hint)
+                            
+                            # AI Optimization: Only use LLM for high-value leads (score >= 8)
+                            if ai_client and lead_score >= 8:
+                                # Fix typo: generate_outreach_dm -> generate_ai_dm
+                                # Arguments: lead_name, group_name, user_msg, lead_score, context_hint, style_hint, stealth
+                                dm_text = await generate_ai_dm(u, group_title, snippet or "", lead_score, social_hint, persona_id, lead_premium)
+                            else:
+                                # AI Savings: Use template for mid-low value leads
+                                dm_text = _fallback_dm(u, group_title, snippet or "", lead_score)
                         except Exception as e:
                             logger.error(f"AI DM generation failed for {u}: {e}")
-                            dm_text = get_fallback_dm(persona_id)
+                            # Fix typo: get_fallback_dm -> _fallback_dm
+                            dm_text = _fallback_dm(u, group_title, snippet or "", 0)
                         
                         if dm_text:
                             try:

@@ -408,7 +408,7 @@ async def get_pro_tip_for_topic(topic: str) -> str:
     
     default_tip = f"***💡 Aiden’s Pro-Tip:*** {random.choice(fallbacks.get(topic, fallbacks['news']))}"
 
-    if not ai_client:
+    if not ai_client or (os.environ.get("AURA_AI_SAVINGS", "0") == "1" and random.random() > 0.3):
         return default_tip
 
     try:
@@ -477,7 +477,7 @@ async def _build_dynamic_tags_async(title: str, body: str) -> List[str]:
     Generates dynamic hashtags based on content using AI if available,
     falling back to keyword extraction.
     """
-    if ai_client and _ai_allow_now():
+    if ai_client and _ai_allow_now() and (os.environ.get("AURA_AI_SAVINGS", "0") != "1" or random.random() < 0.3):
         try:
             sys_prompt = (
                 "Extract 3-5 high-value, technical hashtags for an IPTV Telegram post. "
@@ -658,6 +658,11 @@ async def _ai_generate_image(prompt: str, size: Tuple[int, int] = (1280, 720)) -
 
 async def generate_curator_image_async(title: str, body: str, topic: str) -> Optional[bytes]:
     try:
+        # AI Optimization: Images are expensive (Stability Credits)
+        # Only generate if CURATOR_GEN_IMAGES is set to '1'
+        if os.environ.get("CURATOR_GEN_IMAGES", "0") != "1":
+            return await generate_4k_image_async(title, body)
+
         if not safe_image_allowed(title + " " + body):
             return None
         prompt = await _build_image_prompt(title, body, topic)
@@ -1695,7 +1700,8 @@ async def rewrite_headline(title: str) -> str:
     Rewrites listicle/clickbait titles to be direct and professional.
     Example: "10 Best IPTV Apps" -> "The Best IPTV Apps"
     """
-    if not ai_client:
+    # AI Savings: Only use AI for rewriting if savings is disabled or with 50% chance
+    if not ai_client or (os.environ.get("AURA_AI_SAVINGS", "0") == "1" and random.random() > 0.5):
         # Fallback regex cleanup for common listicle patterns
         clean = re.sub(r'^\d+\s+(Best|Top|Greatest|Most)\s+', r'\1 ', title, flags=re.IGNORECASE)
         return clean
