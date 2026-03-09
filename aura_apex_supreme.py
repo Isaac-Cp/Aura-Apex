@@ -1,4 +1,5 @@
 from typing import Optional, List, Dict, Any, Union, Tuple
+from collections import deque
 import asyncio
 import logging
 import random
@@ -63,6 +64,22 @@ from config import SESSION_STRING as CONFIG_SESSION_STRING
 # Logging Setup
 setup_logging()
 logger = logging.getLogger(__name__)
+
+# Pre-compiled Regex for Performance
+_TME_SANITIZE_RE = re.compile(r'(https?://\S+|t\s?\.\s?me/\S+)', re.IGNORECASE)
+_WHITESPACE_RE = re.compile(r'\s+')
+_CYRILLIC_RE = re.compile(r'[А-Яа-яЁё]')
+_TME_LINKS_RE = re.compile(r'https?://t\.me/(?:joinchat/\w+|\+\w+|[A-Za-z0-9_]+)', re.IGNORECASE)
+_NUMBER_WORD_RE = re.compile(r'\b\d{1,4}\b')
+_COUNTRY_RE = re.compile(r'\b(uk|us|usa|ca|de|fr|it|es|in|au)\b', re.IGNORECASE)
+_EMOJI_FILTER_RE = re.compile(r'[^\u2600-\u27BF\U0001F300-\U0001FAFF]+')
+_USERNAME_RE = re.compile(r'@[\w_]{3,}')
+_START_RE = re.compile(r'/start', re.IGNORECASE)
+_EMAIL_RE = re.compile(r'(email|mailto:)', re.IGNORECASE)
+_FORM_RE = re.compile(r'(form|google forms|typeform)', re.IGNORECASE)
+_HEX_HASH_RE = re.compile(r'[0-9a-fA-F]{32}')
+_PHONE_RE = re.compile(r'\+?[0-9]{10,15}')
+
 try:
     import sentry_sdk
     _SENTRY_DSN = (os.environ.get("SENTRY_DSN") or "").strip()
@@ -75,10 +92,10 @@ def validate_startup_secrets():
     errs = []
     if not API_ID or not str(API_ID).isdigit() or int(API_ID) <= 0:
         errs.append("Invalid API_ID")
-    if not API_HASH or not re.fullmatch(r'[0-9a-fA-F]{32}', str(API_HASH)):
+    if not API_HASH or not _HEX_HASH_RE.fullmatch(str(API_HASH)):
         errs.append("Invalid API_HASH")
     phone = (PHONE_NUMBER or "").strip()
-    if not phone or not re.fullmatch(r'\+?[0-9]{10,15}', phone):
+    if not phone or not _PHONE_RE.fullmatch(phone):
         errs.append("Invalid PHONE_NUMBER")
     sess = (CONFIG_SESSION_STRING or os.environ.get("SESSION_STRING") or "").strip()
     if not sess or len(sess) < 50:
@@ -102,12 +119,12 @@ if GROQ_API_KEY:
 else:
     logger.warning("GROQ_API_KEY missing.")
 _AI_DM_MAX_PER_MIN = int(os.environ.get("APEX_AI_MAX_PER_MIN", "12"))
-_ai_dm_ts: List[float] = []
+_ai_dm_ts: deque = deque()
 def _ai_dm_allow():
     now = time.time()
     cutoff = now - 60.0
-    global _ai_dm_ts
-    _ai_dm_ts = [t for t in _ai_dm_ts if t >= cutoff]
+    while _ai_dm_ts and _ai_dm_ts[0] < cutoff:
+        _ai_dm_ts.popleft()
     if len(_ai_dm_ts) < _AI_DM_MAX_PER_MIN:
         _ai_dm_ts.append(now)
         return True
@@ -145,7 +162,7 @@ CTAS_LOW = [
 ]
 
 def _sanitize_dm(dm: str) -> str:
-    dm = re.sub(r'(https?://\S+|t\s?\.\s?me/\S+)', '', dm, flags=re.IGNORECASE)
+    dm = _TME_SANITIZE_RE.sub('', dm)
     dm = dm.replace("!", ".").replace("...", "..")
     words = dm.split()
     if len(words) > 35:
@@ -269,7 +286,7 @@ def _market_tzinfo():
         return ZoneInfo("UTC")
 
 def _normalize_key(uid: str, text: str) -> str:
-    text = re.sub(r'\s+', ' ', (text or '')).strip().lower()
+    text = _WHITESPACE_RE.sub(' ', (text or '')).strip().lower()
     val = zlib.adler32(f"{uid}:{text}".encode("utf-8")) & 0xffffffff
     return str(val)
 
@@ -2383,7 +2400,7 @@ async def potential_targets_dedupe_loop():
                 seen.add(ln)
                 deduped.append(it)
             if len(deduped) != len(items):
-                save_json(POTENTIAL_TARGETS, deduped)
+                await save_json_async(POTENTIAL_TARGETS, deduped)
                 log_activity("targets_deduped", f"{len(items)}->{len(deduped)}")
         except Exception:
             pass
@@ -4081,13 +4098,13 @@ def _detect_entry_requirements(link, title, desc_texts):
 def _detect_contact_protocols(title, desc_texts):
     blob = ' '.join([title or ''] + desc_texts)
     items = []
-    if re.search(r'@[\w_]{3,}', blob):
+    if _USERNAME_RE.search(blob):
         items.append("dm_username")
-    if re.search(r'/start', blob, flags=re.IGNORECASE):
+    if _START_RE.search(blob):
         items.append("bot_command")
-    if re.search(r'(email|mailto:)', blob, flags=re.IGNORECASE):
+    if _EMAIL_RE.search(blob):
         items.append("email")
-    if re.search(r'(form|google forms|typeform)', blob, flags=re.IGNORECASE):
+    if _FORM_RE.search(blob):
         items.append("form")
     return list(dict.fromkeys(items))
 
@@ -4652,7 +4669,7 @@ async def cmd_scout_join(event):
         if ok:
             stats["last_scout_join_ts"] = now
             stats["rich_joined"] = stats.get("rich_joined", 0) + 1
-            save_json(STATS_FILE, stats)
+            await save_json_async(STATS_FILE, stats)
             await event.reply(f"Joined: {top[1]} ({top[0]} members)")
         else:
             await event.reply(str(reason))

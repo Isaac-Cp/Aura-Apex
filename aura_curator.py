@@ -80,15 +80,31 @@ _LLM_PAGE_CACHE: Dict[str, Tuple[float, List[Tuple[str, str, str]]]] = {}
 _LLM_PAGE_TTL = float(os.environ.get("CURATOR_LLM_CACHE_TTL", "86400") or 86400)
 _TME_SANITIZE_RE = re.compile(r'(https?://\S+|t\s?\.\s?me/\S+)', re.IGNORECASE)
 
+# Pre-compiled Regex for Performance
+_TOK_RE = re.compile(r"[a-z0-9]+")
+_PROTIP_CLEAN_RE = re.compile(r'^[\s\*💡]*(?:Aiden[\'’]s\s+)?Pro-Tip:[\s\*💡]*', re.IGNORECASE)
+_LINKS_RE = re.compile(r'https?://\S+')
+_HTML_TAG_RE = re.compile(r'<[^>]+>')
+_WHITESPACE_RE = re.compile(r'\s+')
+_JSON_EXTRACT_RE = re.compile(r'\\[.*\\]', re.S)
+_FILENAME_CLEAN_RE = re.compile(r'[^A-Za-z0-9_\-]+')
+_NON_DIGIT_RE = re.compile(r"\D")
+_STEP_LIST_RE = re.compile(r'^\d+[\.\)]\s+')
+_STEP_WORD_RE = re.compile(r'\bstep\s*\d+\b', re.IGNORECASE)
+_TOP_CLEAN_RE = re.compile(r'^\d+\s+(Best|Top|Greatest|Most)\s+', re.IGNORECASE)
+_INVITE_HASH_RE = re.compile(r't\.me/\+([A-Za-z0-9_\-]+)')
+_JOINCHAT_HASH_RE = re.compile(r'joinchat/([A-Za-z0-9_\-]+)')
+
 _DEDUP_PATH = os.path.join("data", "curator_dedup.jsonl")
 _DEDUP_CACHE: List[Dict[str, Any]] = []
 _POSTED_LINKS_CACHE: Set[str] = set()
+_POSTED_TITLES_HASH: Set[int] = set()
 _CORE_TERMS = ["iptv", "tivimate", "smarters", "firestick", "m3u"]
 
 import math
 
 def _tok(title: str) -> Dict[str, int]:
-    t = re.findall(r"[a-z0-9]+", (title or "").lower())
+    t = _TOK_RE.findall((title or "").lower())
     d: Dict[str, int] = {}
     for w in t:
         d[w] = d.get(w, 0) + 1
@@ -107,7 +123,7 @@ def _cos(a: Dict[str, int], norm_a: float, b: Dict[str, int], norm_b: float) -> 
     return 0.0 if den == 0 else num/den
 
 def _load_dedup():
-    global _DEDUP_CACHE, _POSTED_LINKS_CACHE
+    global _DEDUP_CACHE, _POSTED_LINKS_CACHE, _POSTED_TITLES_HASH
     if _DEDUP_CACHE:
         return
     try:
@@ -125,11 +141,14 @@ def _load_dedup():
                         _DEDUP_CACHE.append(rec)
                         if "link" in rec:
                             _POSTED_LINKS_CACHE.add(rec["link"])
+                        if "title" in rec:
+                            _POSTED_TITLES_HASH.add(hash(rec["title"].lower().strip()))
                     except Exception:
                         continue
     except Exception:
         _DEDUP_CACHE = []
         _POSTED_LINKS_CACHE = set()
+        _POSTED_TITLES_HASH = set()
 
 def _save_dedup_sync(title: str, link: str = ""):
     try:
@@ -142,6 +161,8 @@ def _save_dedup_sync(title: str, link: str = ""):
         _DEDUP_CACHE.append(rec)
         if link:
             _POSTED_LINKS_CACHE.add(link)
+        if title:
+            _POSTED_TITLES_HASH.add(hash(title.lower().strip()))
     except Exception:
         pass
 
@@ -152,6 +173,10 @@ async def _save_dedup(title: str, link: str = ""):
 def _is_duplicate(title: str, link: str = "", th: float = 0.90) -> bool:
     _load_dedup()
     if link and link in _POSTED_LINKS_CACHE:
+        return True
+    
+    title_clean = (title or "").lower().strip()
+    if title_clean and hash(title_clean) in _POSTED_TITLES_HASH:
         return True
     
     vec_a = _tok(title)
@@ -415,7 +440,7 @@ async def get_pro_tip_for_topic(topic: str) -> str:
         
         # Strip any existing labels/emojis/formatting to normalize
         # This removes variations of "Aiden's Pro-Tip", emojis, and asterisks from the start
-        clean_tip = re.sub(r'^[\s\*💡]*(?:Aiden[\'’]s\s+)?Pro-Tip:[\s\*💡]*', '', tip, flags=re.I).strip()
+        clean_tip = _PROTIP_CLEAN_RE.sub('', tip).strip()
         
         # Re-apply the canonical label
         tip = f"***💡 Aiden’s Pro-Tip:*** {clean_tip}"
@@ -655,7 +680,7 @@ async def generate_curator_image_async(title: str, body: str, topic: str) -> Opt
 def extract_links(text: str) -> List[str]:
     if not text:
         return []
-    return re.findall(r'https?://\S+', text)
+    return _LINKS_RE.findall(text)
 
 _session: Optional[aiohttp.ClientSession] = None
 
@@ -745,8 +770,8 @@ async def ai_semantic_extract_links(html: str, source_name: str) -> List[Tuple[s
             return []
         if not _ai_allow_now():
             await asyncio.sleep(1.0)
-        txt = re.sub(r'<[^>]+>', ' ', html or '')
-        txt = re.sub(r'\s+', ' ', txt).strip()
+        txt = _HTML_TAG_RE.sub(' ', html or '')
+        txt = _WHITESPACE_RE.sub(' ', txt).strip()
         if not txt:
             return []
         sys_p = "You are a headless data extractor. Your input is raw HTML or text. Your output must be a strict JSON array of objects with keys: title (string), url (string). No explanations or code fences."
@@ -762,7 +787,7 @@ async def ai_semantic_extract_links(html: str, source_name: str) -> List[Tuple[s
         try:
             data = json.loads(raw)
         except Exception:
-            m = re.search(r'\\[.*\\]', raw, flags=re.S)
+            m = _JSON_EXTRACT_RE.search(raw)
             if m:
                 try:
                     data = json.loads(m.group(0))
@@ -1748,7 +1773,7 @@ async def post_to_channel(client: TelegramClient, channel_id: int, source: str, 
         img_bytes = await generate_curator_image_async(final_title, body, topic_info["topic"])
         
         if img_bytes:
-            fname = re.sub(r'[^A-Za-z0-9_\-]+', '_', (final_title or 'aura_apex'))[:60] + ".jpg"
+            fname = _FILENAME_CLEAN_RE.sub('_', (final_title or 'aura_apex'))[:60] + ".jpg"
             bio = io.BytesIO(img_bytes)
             try:
                 bio.name = fname
@@ -2141,10 +2166,10 @@ async def dead_link_sentinel(client: TelegramClient, channel_id: int):
 def extract_invite_hash(invite_link: str) -> str:
     if not invite_link:
         return ""
-    m = re.search(r't\.me/\+([A-Za-z0-9_\-]+)', invite_link)
+    m = _INVITE_HASH_RE.search(invite_link)
     if m:
         return m.group(1)
-    m = re.search(r'joinchat/([A-Za-z0-9_\-]+)', invite_link)
+    m = _JOINCHAT_HASH_RE.search(invite_link)
     if m:
         return m.group(1)
     return ""
