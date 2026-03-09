@@ -47,7 +47,7 @@ NEGATIVE_TRIGGERS = rules.get("NEGATIVE_TRIGGERS", [])
 MARKET_KEYWORDS = rules.get("MARKET_KEYWORDS", {})
 
 REQUEST_TIMEOUT = 30
-CHECK_INTERVAL_SECONDS = 300 if os.environ.get("AURA_MODE", "").lower() == "testing" else 6 * 3600
+CHECK_INTERVAL_SECONDS = 300
 
 BRAND_COLORS = [(12, 20, 35), (22, 32, 48), (255, 215, 0)]
 

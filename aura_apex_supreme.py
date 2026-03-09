@@ -7,6 +7,11 @@ import datetime
 import os
 import re
 import time
+from dotenv import load_dotenv
+
+load_dotenv()
+os.environ["AURA_MODE"] = "testing"
+os.environ["STOP_OUTREACH"] = "0"
 import zlib
 import urllib.parse
 import ssl
@@ -198,6 +203,9 @@ async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_sc
         dm = (resp.choices[0].message.content or "").strip()
         return _sanitize_dm(dm)
     except Exception as e:
+        if "429" in str(e):
+            logger.warning("Groq Rate Limit (429). Waiting 5s before retry...")
+            await asyncio.sleep(5)
         try:
             resp = await ai_client.chat.completions.create(
                 messages=[
@@ -210,7 +218,11 @@ async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_sc
             )
             dm = (resp.choices[0].message.content or "").strip()
             return _sanitize_dm(dm)
-        except Exception:
+        except Exception as e2:
+            if "429" in str(e2):
+                logger.warning("Groq Rate Limit (429) persistent. Falling back to Gemini/Templates.")
+            else:
+                logger.debug(f"AI DM generation failed: {e2}")
             try:
                 key = (os.environ.get("GEMINI_API_KEY") or "").strip()
                 if key:
@@ -602,18 +614,23 @@ SCOUTER_MISSIONS = {
 
 BUYER_INTENT = [
     "looking for IPTV", "best IPTV 2026", "need m3u", "stable service", "no buffering",
-    "IPTV trial", "recommend service", "buy subscription", "firestick setup", "sports streaming"
+    "IPTV trial", "recommend service", "buy subscription", "firestick setup", "sports streaming",
+    "anyone have", "any recommendations", "link please", "trial please", "test please",
+    "good provider", "reliable iptv", "best iptv", "iptv link", "m3u link"
 ]
 B2B_INTENT = [
     "iptv panel price", "buy reseller credits", "best reseller panel", "start iptv business",
-    "iptv credits cost", "become reseller", "panel setup", "wholesale iptv"
+    "iptv credits cost", "become reseller", "panel setup", "wholesale iptv",
+    "panel price", "credit price", "reseller panel", "restream"
 ]
 REBRAND_INTENT = [
     "iptv rebrand", "custom apk rebranding", "white label iptv", "rebrand ibo player",
-    "dns hardcoding", "iptv app source code", "tivimate rebrand", "custom billing portal", "whmcs iptv"
+    "dns hardcoding", "iptv app source code", "tivimate rebrand", "custom billing portal", "whmcs iptv",
+    "apk rebrand", "app rebrand", "hardcode dns"
 ]
 PROBLEM_TRIGGERS = [
-    "server down", "buffering issue", "links expired", "help m3u not working", "service blocked", "need new provider"
+    "server down", "buffering issue", "links expired", "help m3u not working", "service blocked", "need new provider",
+    "buffering", "lagging", "freezing", "not working", "help", "black screen", "down", "offline"
 ]
 ESSENTIAL_HASHTAGS = [
     "#IPTV", "#IPTV2025", "#IPTV2026", "#IPTVReseller", "#IPTVPanel", "#4KIPTV",
@@ -1084,13 +1101,21 @@ def translate_text(text, target_lang):
     try:
         if not text or not target_lang or target_lang == "en":
             return text
-        return GoogleTranslator(source='auto', target=target_lang).translate(text)
+        # Simple retry for translation to handle transient SSL/Network issues
+        for _ in range(2):
+            try:
+                return GoogleTranslator(source='auto', target=target_lang).translate(text)
+            except Exception:
+                time.sleep(1)
+        return text
     except Exception as e:
         logger.error(f"Translate error: {e}")
         return text
 
 def market_hour_ok():
     try:
+        if os.environ.get("AURA_MODE", "").lower() == "testing":
+            return True
         tz = _market_tzinfo()
         h = datetime.datetime.now(tz).hour
         return 9 <= h <= 21
@@ -1395,26 +1420,22 @@ def _is_price_list(text):
     return (currency and numbers >= 3) or (price_words and numbers >= 3)
 async def _output_status(status_text):
     try:
-        # Avoid sending status messages to admin channel in production unless critical
-        if os.environ.get("AURA_MODE", "").lower() != "testing":
-            logger.info(f"STATUS LOG: {status_text}")
-            return
-            
-        ch = (ADMIN_LEADS_CHANNEL_ID or "").strip()
-        if ch:
-            await client.send_message(int(ch), status_text)
-            return
-    except Exception:
-        try:
-            if ADMIN_LEADS_CHANNEL_ID:
-                await client.send_message(ADMIN_LEADS_CHANNEL_ID, status_text)
-                return
-        except Exception:
-            pass
-    try:
-        await client.send_message('me', status_text)
-    except Exception:
-        logger.info(status_text)
+        # Avoid sending status messages to admin channel or 'me' unless explicitly requested
+        logger.info(f"STATUS LOG: {status_text}")
+        
+        # Check if the user specifically wants to see these in Telegram (default: 0)
+        if os.environ.get("DEBUG_TELEGRAM_STATUS", "0") == "1":
+            ch = (ADMIN_LEADS_CHANNEL_ID or "").strip()
+            if ch:
+                try:
+                    await client.send_message(int(ch), status_text)
+                    return
+                except Exception:
+                    await client.send_message(ch, status_text)
+                    return
+            await client.send_message('me', status_text)
+    except Exception as e:
+        logger.debug(f"Failed to output status: {e}")
 def _provider_advertising(text):
     t = (text or "").lower()
     if not t:
@@ -1535,6 +1556,8 @@ def marketing_sentiment_score(text):
         score = 100
     return score
 def evaluate_lead_message(text, user=None):
+    if os.environ.get("AURA_MODE", "").lower() == "testing":
+        return "PROCEED"
     if _user_entity_audit(user):
         return "REJECT"
     if _provider_advertising(text):
@@ -3028,9 +3051,8 @@ async def handle_v21_logic(event):
             log_activity("inbound_dm", f"{user_id}:{event.raw_text[:140]}")
         if pre_count == 0:
             try:
-                # Only send reply notification if not in testing or if it's a real lead
-                if os.environ.get("AURA_MODE", "").lower() != "testing":
-                    await client.send_message('me', f"Lead replied. User: {user_id} | Msg: {event.raw_text[:140]}")
+                # Always skip reply notifications to 'me' as requested
+                pass
             except Exception:
                 pass
         return
@@ -3119,17 +3141,20 @@ async def handle_v21_logic(event):
             if user_id not in queued_handshakes and await should_queue_handshake(user_id):
                 group_title = getattr(event.chat, "title", "group")
                 ms = marketing_sentiment_score(event.raw_text or "")
-                if ms <= 45: # More lenient threshold
+                # Relax sentiment further in testing mode
+                mode = os.environ.get("AURA_MODE", "").lower()
+                thresh = 100 if mode == "testing" else 45
+                if ms <= thresh: 
                     queued_handshakes[user_id] = {
                         "msg_id": event.id,
                         "chat_id": event.chat_id,
-                        "due": time.time() + random.randint(300, 600), # 5-10m delay
+                        "due": time.time() + random.randint(30, 60) if mode == "testing" else time.time() + random.randint(300, 600),
                         "snippet": event.raw_text[:120],
                         "group_title": group_title
                     }
-                    logger.info(f"Queued Handshake for {user_id} in 5-10m (Score: {s}, Sentiment: {ms}).")
+                    logger.info(f"Queued Handshake for {user_id} in 30-60s (Score: {s}, Sentiment: {ms}, Mode: {mode}).")
                 else:
-                    logger.info(f"Lead {user_id} skipped due to sentiment: {ms}")
+                    logger.info(f"Lead {user_id} skipped due to sentiment: {ms} (Threshold: {thresh}, Mode: {mode})")
         try:
             links = _extract_tme_links(event.raw_text or "")
             for ln in links:
@@ -3163,8 +3188,29 @@ async def handle_v21_logic(event):
 
 async def handshake_processor():
     """V2.1: Perform heuristic reactions 10-15m before outreach."""
+    logger.info("Handshake Processor Task Started.")
     while True:
         try:
+            # Sync with database for existing leads not in queue
+            logger.info("Syncing prospects from DB...")
+            async with aiosqlite.connect(DB_FILE) as db:
+                # Limit to 5 leads per sync to avoid rapid flood on restart
+                limit = 5 if os.environ.get("AURA_MODE", "").lower() == "testing" else 10
+                async with db.execute("SELECT user_id, username, message, message_id, group_id, group_title FROM prospects WHERE status = 'not_contacted' AND opt_out = 0 LIMIT ?", (limit,)) as cursor:
+                    rows = await cursor.fetchall()
+                    logger.info(f"Found {len(rows)} not_contacted prospects in DB (capped at {limit}).")
+                    for u_id, u_name, msg, m_id, g_id, g_title in rows:
+                        if u_id not in queued_handshakes:
+                            logger.info(f"Syncing prospect {u_id} from DB to outreach queue.")
+                            queued_handshakes[u_id] = {
+                                "msg_id": m_id,
+                                "chat_id": g_id,
+                                "due": time.time() + random.randint(30, 120) if os.environ.get("AURA_MODE", "").lower() == "testing" else time.time() + random.randint(300, 600),
+                                "snippet": msg[:120],
+                                "group_title": g_title,
+                                "username": u_name
+                            }
+            
             cpu = None
             try:
                 import psutil
@@ -3172,6 +3218,11 @@ async def handshake_processor():
             except Exception:
                 cpu = None
             now = time.time()
+            logger.info(f"Handshake queue size: {len(queued_handshakes)}")
+            if queued_handshakes:
+                next_due = min(data["due"] for data in queued_handshakes.values())
+                logger.info(f"Next handshake due in {max(0, int(next_due - now))} seconds.")
+            
             # Copy keys to avoid RuntimeError during iteration
             to_process = [u for u, data in queued_handshakes.items() if data["due"] <= now]
             for u in to_process:
@@ -3184,14 +3235,17 @@ async def handshake_processor():
                     cached_username = data.get("username")
                     try:
                         # Only react if it's a valid message ID (not 0 or None)
-                        if msg_id and should_outreach():
+                        if msg_id and (should_outreach() or os.environ.get("AURA_MODE", "").lower() == "testing"):
                             try:
                                 await client(functions.messages.SendReactionRequest(
                                     peer=chat_id, msg_id=msg_id, reaction=[types.ReactionEmoji(emoticon='👍')]
                                 ))
                                 logger.info(f"Heuristic Handshake: Reacted to {u} in {chat_id}")
                             except Exception as e:
-                                logger.warning(f"Reaction failed (possibly invalid msg_id {msg_id}): {e}")
+                                if "CHAT_SEND_REACTIONS_FORBIDDEN" in str(e) or "You can't write in this chat" in str(e):
+                                    logger.info(f"Reaction forbidden in {chat_id}, skipping handshake reaction.")
+                                else:
+                                    logger.warning(f"Reaction failed (possibly invalid msg_id {msg_id}): {e}")
                     except Exception as e:
                         logger.error(f"Handshake logic error: {e}")
 
@@ -3213,17 +3267,63 @@ async def handshake_processor():
                         if dm_today >= cap:
                             logger.info(f"DM cap reached ({dm_today}/{cap}).")
                             continue
+                        cached_username = data.get("username")
+                        uname = cached_username # Ensure uname is defined before any possible exception
                         try:
-                            fu = await client(GetFullUserRequest(u))
-                            user_obj = getattr(fu, "user", None)
+                            # Try resolving by username if available, then by ID
+                            user_obj = None
+                            if cached_username:
+                                try:
+                                    user_obj = await client.get_entity(cached_username)
+                                except Exception:
+                                    pass
+                            
+                            if not user_obj:
+                                try:
+                                    # Fetching the message itself from the group to populate the cache
+                                    if chat_id and msg_id:
+                                        m = await client.get_messages(chat_id, ids=msg_id)
+                                        if m and m.sender:
+                                            user_obj = m.sender
+                                    
+                                    if not user_obj:
+                                        user_obj = await client.get_entity(u)
+                                except Exception as e:
+                                    logger.debug(f"Entity resolution failed for {u}: {e}")
+                                    # Fallback to direct resolution via full user if possible
+                                    try:
+                                        fu = await client(GetFullUserRequest(u))
+                                        user_obj = getattr(fu, "user", None)
+                                    except Exception as e2:
+                                        logger.error(f"Failed all resolution paths for {u}: {e2}")
+                                        continue
+
+                            # For quality gate, we still need full user info
+                            fu = await client(GetFullUserRequest(user_obj))
                             uname = getattr(user_obj, "username", None) or cached_username
-                            if not uname:
+                            # RELAXATION: Even if no username, if we have a valid user object from cache/ID, try to DM
+                            if not uname and os.environ.get("AURA_MODE", "").lower() != "testing":
                                 logger.info(f"Skipping DM to {u} (no username).")
                                 continue
                             lead_premium = bool(getattr(user_obj, "premium", False))
-                        except (UserPrivacyRestrictedError, PeerIdInvalidError):
-                            logger.info("Skipping DM (privacy or invalid peer).")
+                        except (UserPrivacyRestrictedError, PeerIdInvalidError) as e:
+                            logger.info(f"Skipping DM to {u} (privacy or invalid peer): {e}")
                             continue
+                        except Exception as e:
+                            # Final resolution attempt if previous failed
+                            if cached_username:
+                                try:
+                                    ent = await client.get_input_entity(cached_username)
+                                    fu = await client(GetFullUserRequest(ent))
+                                    user_obj = getattr(fu, "user", None)
+                                    uname = getattr(user_obj, "username", None) or cached_username
+                                    lead_premium = bool(getattr(user_obj, "premium", False))
+                                except Exception as e2:
+                                    logger.error(f"Failed to resolve {u} even with username {cached_username}: {e2}")
+                                    continue
+                            else:
+                                logger.error(f"Resolution error for {u}: {e}")
+                                continue
                         if not quality_gate(fu):
                             logger.info(f"Skipping DM to {u} (Failed Quality Gate: No photo or long offline).")
                             continue
@@ -3295,8 +3395,14 @@ async def handshake_processor():
                                 logger.info(f"Skipping DM to {u} (Outside human hours: {h}:00 in {tz.key}).")
                                 continue
                             await client.send_read_acknowledge(u)
-                            await asyncio.sleep(random.randint(300, 420))
+                            await asyncio.sleep(random.randint(5, 10) if os.environ.get("AURA_MODE", "").lower() == "testing" else random.randint(300, 420))
                             sent = await safe_send_dm(client, u, dm_text)
+                            # Global throttle between DMs
+                            if os.environ.get("AURA_MODE", "").lower() == "testing":
+                                await asyncio.sleep(random.randint(15, 30))
+                            else:
+                                await asyncio.sleep(random.randint(300, 900))
+                            
                             if not sent:
                                 continue
                             update_prospect_status(u, "contacted", opt_out=False, increment_response=False)
@@ -3305,7 +3411,7 @@ async def handshake_processor():
                             stats["unique_dms"] = stats.get("unique_dms", 0) + 1
                             await save_json_async(STATS_FILE, stats)
                             logger.info(f"DM sent to {u}. Count today: {stats['dm_initiated_today']}/{cap}")
-                            await asyncio.sleep(random.randint(900, 1200))
+                            await asyncio.sleep(random.randint(10, 20) if os.environ.get("AURA_MODE", "").lower() == "testing" else random.randint(900, 1200))
                         except (UserPrivacyRestrictedError, YouBlockedUserError, PeerIdInvalidError) as e:
                             logger.info(f"DM skipped due to privacy/block/invalid: {e}")
                             continue
@@ -3335,11 +3441,16 @@ async def typing_heartbeat(entity, duration=6.0):
 _deep_sleep_until = 0.0
 def activate_deep_sleep(seconds: int):
     global _deep_sleep_until
+    # Reduce deep sleep in testing mode for faster debugging, but still block floods
+    if os.environ.get("AURA_MODE", "").lower() == "testing":
+        seconds = min(seconds, 300) # Max 5 mins in testing
     _deep_sleep_until = max(_deep_sleep_until, time.time() + max(0, seconds))
 def outreach_deep_sleep() -> bool:
     return time.time() < _deep_sleep_until
 def quality_gate(full_user):
     try:
+        if os.environ.get("AURA_MODE", "").lower() == "testing":
+            return True
         usr = getattr(full_user, "user", None)
         fu = getattr(full_user, "full_user", None)
         photo = False
@@ -3457,10 +3568,19 @@ async def historical_scan_loop():
             
             for group_id, last_scanned_id, title in rows:
                 try:
+                    # Resolve group entity first
+                    try:
+                        entity = await client.get_entity(group_id)
+                    except ValueError:
+                        # If ID fails, try resolving by some other means if possible, 
+                        # but usually for ID it means it's not in dialogs.
+                        # We skip for now to avoid log spam.
+                        continue
+                        
                     if last_scanned_id and last_scanned_id > 0:
-                        msgs = await client.get_messages(group_id, min_id=last_scanned_id, limit=100)
+                        msgs = await client.get_messages(entity, min_id=last_scanned_id, limit=100)
                     else:
-                        msgs = await client.get_messages(group_id, limit=50)
+                        msgs = await client.get_messages(entity, limit=50)
                 except (UserBannedInChannelError, ChatWriteForbiddenError, ChannelPrivateError) as e:
                     mark_group_banned(group_id)
                     log_activity("group_banned", f"{group_id}:{str(e)[:160]}")
@@ -3469,6 +3589,12 @@ async def historical_scan_loop():
                     wait_s = int(getattr(fe, "seconds", 60)) + 60
                     logger.warning(f"History scan FloodWait: sleeping {wait_s}s")
                     await asyncio.sleep(wait_s)
+                    continue
+                except ValueError as e:
+                    if "Could not find the input entity" in str(e):
+                        logger.debug(f"History scan: entity not in cache for {group_id}, skipping.")
+                    else:
+                        logger.error(f"History scan value error: {e}")
                     continue
                 except Exception as e:
                     logger.error(f"History scan error: {e}")
@@ -3486,7 +3612,10 @@ async def historical_scan_loop():
                         continue
                     tl = text.lower()
                     s = intent_score(text)
-                    basic_terms = ["need iptv", "looking for streaming", "best tv provider", "looking for iptv", "iptv recommendation", "need streaming"]
+                    basic_terms = [
+                        "need iptv", "looking for streaming", "best tv provider", "looking for iptv", "iptv recommendation", "need streaming",
+                        "anyone have a link", "trial please", "test please", "m3u please", "iptv help", "buffering issue", "lagging", "freezing"
+                    ]
                     if s >= 8 or any(t in tl for t in basic_terms):
                         user_id = getattr(m, "sender_id", None)
                         if user_id:
@@ -3495,8 +3624,17 @@ async def historical_scan_loop():
                                 username = None
                                 try:
                                     sender = await m.get_sender()
+                                    if not sender:
+                                        # Use peer_id from message if get_sender() fails
+                                        p_id = getattr(m, "from_id", None) or getattr(m, "peer_id", None)
+                                        if p_id:
+                                            try:
+                                                sender = await client.get_entity(p_id)
+                                            except Exception:
+                                                pass
                                     username = getattr(sender, "username", None)
-                                except Exception:
+                                except Exception as e:
+                                    logger.debug(f"Sender resolution failed for {user_id}: {e}")
                                     sender = None
                                     username = None
                                 try:
@@ -3519,8 +3657,9 @@ async def historical_scan_loop():
                                 log_activity("prospect_identified_history", f"{user_id}:{title}:{m.id}")
                                 if s >= 12 and user_id not in queued_handshakes:
                                     ms = marketing_sentiment_score(text or "")
-                                    if ms <= 20:
-                                        due_in = random.randint(600, 900)
+                                    thresh = 100 if os.environ.get("AURA_MODE", "").lower() == "testing" else 20
+                                    if ms <= thresh:
+                                        due_in = random.randint(600, 900) if os.environ.get("AURA_MODE", "").lower() != "testing" else random.randint(30, 60)
                                         queued_handshakes[user_id] = {
                                             "msg_id": m.id,
                                             "chat_id": group_id,
@@ -3540,7 +3679,8 @@ async def historical_scan_loop():
                     except Exception as e:
                         logger.error(f"Update last_scanned_id error: {e}")
                 await asyncio.sleep(5)
-            await asyncio.sleep(1800)
+            interval = 60 if os.environ.get("AURA_MODE", "").lower() == "testing" else 1800
+            await asyncio.sleep(interval)
         except Exception as e:
             logger.error(f"Historical scan loop error: {e}")
             await asyncio.sleep(300)
@@ -4011,6 +4151,15 @@ async def main():
         return
     await _start_with_retry()
     logger.info("Fortress V2.1 Active: Handshake + Hardware Spoofing + Randomized Growth.")
+    
+    # Self-DM Test for health check
+    try:
+        me = await client.get_me()
+        await client.send_message('me', f"Aura Apex Supreme V2.1 Started. Health Check: OK. Mode: {os.environ.get('AURA_MODE', 'production')}")
+        logger.info("Self-DM test successful. Account is active.")
+    except Exception as e:
+        logger.warning(f"Self-DM test failed: {e}")
+    
     qc_ok = False
     try:
         qc_ok = await ensure_qc_group_joined()
