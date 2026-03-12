@@ -10,7 +10,7 @@ from aura_core import setup_logging
 setup_logging()
 logger = logging.getLogger("ProcessManager")
 
-SCRIPTS = ["aura_apex_supreme.py", "aura_curator.py"]
+SCRIPTS = ["aura_apex_supreme.py", "aura_curator.py", "keep_alive.py"]
 PROCESSES = {}
 WEB_PROCESS = None
 
@@ -20,8 +20,6 @@ def start_process(script_name):
         logger.info(f"Starting {script_name}...")
         # Start the process independently with a fresh environment
         env = os.environ.copy()
-        if script_name == "keep_alive.py":
-            env["PORT"] = "5005"
         p = subprocess.Popen([sys.executable, script_name], env=env)
         PROCESSES[script_name] = p
         return p

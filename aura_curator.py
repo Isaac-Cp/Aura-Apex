@@ -99,7 +99,7 @@ _INVITE_HASH_RE = re.compile(r't\.me/\+([A-Za-z0-9_\-]+)')
 _JOINCHAT_HASH_RE = re.compile(r'joinchat/([A-Za-z0-9_\-]+)')
 
 # Core IPTV Terms for relevance filtering
-_CORE_TERMS = ["iptv", "tivimate", "smarters", "firestick", "m3u", "streaming", "buffer", "dns", "rebrand"]
+_CORE_TERMS = ["iptv", "tivimate", "smarters", "firestick", "m3u", "streaming", "buffer", "dns", "rebrand", "ott", "xciptv", "xstream", "strong8k", "b1g", "apk"]
 
 _DEDUP_PATH = os.path.join("data", "curator_dedup.jsonl")
 _DEDUP_CACHE: List[Dict[str, Any]] = []

@@ -38,7 +38,6 @@ from aura_core import (
     proxy_health_monitor, should_outreach, load_json, save_json, clean_old_logs_async,
     calculate_lead_score, setup_logging, load_json_async, save_json_async
 )
-from keep_alive import keep_alive
 from config import (
     API_ID, API_HASH, PHONE_NUMBER, GROQ_API_KEY,
     BANNED_ZONES, BANNED_CURRENCIES, JUNK_KEYWORDS, 
@@ -2829,7 +2828,7 @@ async def gatekeeper(chat_ref: Any) -> Tuple[bool, str]:
             now_ts = datetime.now(timezone.utc)
             recent = [m for m in messages if getattr(m, "date", None)]
             # Relaxed Activity Check: Just need 1 message in last 7 days (168 hours)
-            recent = [m for m in recent if (now_ts - (m.date if m.date.tzinfo else m.date.replace(tzinfo=datetime.timezone.utc))) <= datetime.timedelta(hours=168)]
+            recent = [m for m in recent if (now_ts - (m.date if m.date.tzinfo else m.date.replace(tzinfo=timezone.utc))) <= timedelta(hours=168)]
             if len(recent) < 1:
                 await client(LeaveChannelRequest(chat_id))
                 try:
@@ -3606,8 +3605,8 @@ def quality_gate(full_user):
             dt = getattr(st, "was_online", None)
             if dt:
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=datetime.timezone.utc)
-                if (now_ts - dt) <= datetime.timedelta(days=3):
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if (now_ts - dt) <= timedelta(days=3):
                     return True
         return False
     except Exception:
@@ -4471,12 +4470,10 @@ async def main():
 if __name__ == '__main__':
     try:
         if os.environ.get("DRY_RUN") == "1":
-            keep_alive()
             logger.info("DRY_RUN active: Health endpoint started on PORT. Skipping Telegram start.")
             while True:
                 time.sleep(60)
         else:
-            keep_alive()
             loop.run_until_complete(main())
     except KeyboardInterrupt:
         pass
