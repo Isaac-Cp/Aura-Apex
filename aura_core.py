@@ -466,5 +466,16 @@ def calculate_lead_score(text: str, user: Any = None) -> int:
     except Exception:
         return 0
 
+def is_high_value_topic(title: str) -> bool:
+    """Returns True if the topic title contains high-value IPTV optimization keywords."""
+    t = (title or "").lower()
+    hv = [
+        "tivimate vs smarters pro",
+        "isp throttling in uk/usa",
+        "optimizing iptv buffer size for 4k playback",
+        "setup guide: m3u vs stalker portal"
+    ]
+    return any(p in t for p in hv)
+
 def setup_logging_v2(log_file: str = "bot.log", level: int = logging.INFO):
     return setup_logging(log_file, level)

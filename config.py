@@ -16,7 +16,10 @@ def load_json_config(path, default):
 
 # Load rules from external JSON
 RULES_PATH = os.path.join("data", "rules.json")
-rules = load_json_config(RULES_PATH, {})
+
+def get_rules():
+    """Dynamically load and return the latest rules from rules.json."""
+    return load_json_config(RULES_PATH, {})
 
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
@@ -33,6 +36,8 @@ WAITING_FOR_CODE_FILE = "WAITING_FOR_CODE"
 BLACKLIST_FILE = "blacklist.txt"
 KEEP_ALIVE_SECRET = os.getenv("KEEP_ALIVE_SECRET", "changeme")
 
+# Static fallbacks for initial load, but functions should use get_rules()
+rules = get_rules()
 BANNED_ZONES = rules.get("BANNED_ZONES", [])
 BANNED_CURRENCIES = rules.get("BANNED_CURRENCIES", [])
 JUNK_KEYWORDS = rules.get("JUNK_KEYWORDS", [])

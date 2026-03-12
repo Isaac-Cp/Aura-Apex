@@ -49,8 +49,6 @@ from config import (
 from config import SESSION_STRING as CONFIG_SESSION_STRING
 
 load_dotenv()
-os.environ["AURA_MODE"] = "testing"
-os.environ["STOP_OUTREACH"] = "0"
 
 try:
     import praw
@@ -125,6 +123,11 @@ def _ai_dm_allow():
     cutoff = now - 60.0
     while _ai_dm_ts and _ai_dm_ts[0] < cutoff:
         _ai_dm_ts.popleft()
+    
+    # Jitter/Savings: randomly skip 10% of calls to save credits and appear more human
+    if os.environ.get("AURA_AI_SAVINGS", "0") == "1" and random.random() < 0.1:
+        return False
+
     if len(_ai_dm_ts) < _AI_DM_MAX_PER_MIN:
         _ai_dm_ts.append(now)
         return True
@@ -195,7 +198,7 @@ async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_sc
     if message_ts:
         try:
             # Handle ISO format like 2026-03-09T20:28:39+00:00
-            ts = datetime.datetime.fromisoformat(message_ts.replace('Z', '+00:00'))
+            ts = datetime.fromisoformat(message_ts.replace('Z', '+00:00'))
             now = datetime.now(timezone.utc)
             days_old = (now - ts).days
         except Exception:
@@ -1738,26 +1741,32 @@ async def _get_db_keywords():
         return []
 
 async def _title_hit(title):
+    from config import get_rules
+    rules = get_rules()
     t = (title or "").lower()
     # Check rules.json/config.py first
-    if any(k in t for k in (REBRAND_KEYWORDS or [])): return True
-    if any(k in t for k in (URGENCY_KEYWORDS or [])): return True
-    if any(k in t for k in (COMMERCIAL_KEYWORDS or [])): return True
+    if any(k in t for k in (rules.get("REBRAND_KEYWORDS", []) or [])): return True
+    if any(k in t for k in (rules.get("URGENCY_KEYWORDS", []) or [])): return True
+    if any(k in t for k in (rules.get("COMMERCIAL_KEYWORDS", []) or [])): return True
     # Check DB Keywords
     db_kws = await _get_db_keywords()
     return any(k in t for k in db_kws)
 
 async def _title_buyer_hit(title):
+    from config import get_rules
+    rules = get_rules()
     t = (title or "").lower()
-    return any(k.lower() in t for k in (BUYER_PAIN_KEYWORDS or []))
+    return any(k.lower() in t for k in (rules.get("BUYER_PAIN_KEYWORDS", []) or []))
 
 async def _blacklisted(title):
+    from config import get_rules
+    rules = get_rules()
     t = (title or "").lower()
     # Check Intelligence Blacklist (rules.json)
-    if any(k in t for k in (SENTIMENT_BLACKLIST or [])): return True
-    if any(k in t for k in (JUNK_KEYWORDS or [])): return True
+    if any(k in t for k in (rules.get("SENTIMENT_BLACKLIST", []) or [])): return True
+    if any(k in t for k in (rules.get("JUNK_KEYWORDS", []) or [])): return True
     # Check Seller Shield (rules.json)
-    if any(k.lower() in t for k in (SELLER_SHIELD_TERMS or [])): return True
+    if any(k.lower() in t for k in (rules.get("SELLER_SHIELD_TERMS", []) or [])): return True
     return False
 async def _log_join_event_async(link, title, status, reason):
     try:
@@ -3175,7 +3184,11 @@ async def handle_v21_logic(event):
         except Exception:
             username = None
         
-        if any(k in text for k in KEYWORD_TRIGGERS):
+        from config import get_rules
+        _current_rules = get_rules()
+        _triggers = (_current_rules.get("URGENCY_KEYWORDS", []) or []) + (_current_rules.get("COMMERCIAL_KEYWORDS", []) or []) + (_current_rules.get("REBRAND_KEYWORDS", []) or [])
+        
+        if any(k in text for k in _triggers):
             try:
                 # Use async load/save for New Lead Scoring
                 leads = await load_json_async(LEADS_JSON, [])
@@ -3459,6 +3472,17 @@ async def handshake_processor():
                             # Fix typo: get_fallback_dm -> _fallback_dm
                             dm_text = _fallback_dm(u, group_title, snippet or "", 0)
                         
+                        # Final check: Ensure we haven't messaged this user already (status check)
+                        try:
+                            async with aiosqlite.connect(DB_FILE) as db:
+                                async with db.execute("SELECT status FROM prospects WHERE user_id = ? AND status = 'contacted' LIMIT 1", (u,)) as cursor:
+                                    already_contacted = await cursor.fetchone()
+                                    if already_contacted:
+                                        logger.info(f"Skipping DM to {u} (already contacted according to DB).")
+                                        continue
+                        except Exception as e:
+                            logger.error(f"DB check failed for {u}: {e}")
+
                         if dm_text:
                             try:
                                 await client.send_message(u, dm_text)
@@ -3937,7 +3961,7 @@ async def _compute_engagement(entity):
         msgs = await client.get_messages(entity, limit=100)
     except Exception:
         msgs = []
-    now = datetime.datetime.utcnow()
+    now = datetime.now(timezone.utc)
     count_last_7d = 0
     reactions_total = 0
     reactions_counted = 0

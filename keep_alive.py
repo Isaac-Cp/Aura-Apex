@@ -2,7 +2,7 @@ from flask import Flask, render_template, request, send_from_directory
 import sqlite3
 import os
 import json
-import datetime
+from datetime import datetime
 import time
 from threading import Thread
 from config import KEEP_ALIVE_SECRET, DB_FILE
@@ -152,7 +152,7 @@ def get_recent_logs():
             # Get last 15 attempts
             cur.execute("SELECT id, title, status, ts FROM join_attempts ORDER BY ts DESC LIMIT 15")
             for row in cur.fetchall():
-                dt = datetime.datetime.fromtimestamp(row[3]).strftime('%H:%M:%S')
+                dt = datetime.fromtimestamp(row[3]).strftime('%H:%M:%S')
                 logs.append({
                     "id": row[0],
                     "title": row[1],
@@ -592,7 +592,7 @@ def clear_bot_logs():
     try:
         if os.path.exists(log_file):
             with open(log_file, "w", encoding="utf-8") as f:
-                f.write(f"--- Log Cleared at {datetime.datetime.now()} ---\n")
+                f.write(f"--- Log Cleared at {datetime.now()} ---\n")
         return json.dumps({"status": "ok", "message": "Logs cleared."})
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)}), 500

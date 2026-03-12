@@ -22,7 +22,7 @@ from groq import AsyncGroq
 from PIL import Image, ImageDraw, ImageFont
 from zoneinfo import ZoneInfo
 
-from aura_core import setup_logging
+from aura_core import setup_logging, is_high_value_topic
 from config import (
     API_ID, API_HASH, SESSION_STRING, GROQ_API_KEY, CURATOR_CHANNEL_ID, JUNK_KEYWORDS,
     REQUEST_TIMEOUT, CHECK_INTERVAL_SECONDS, BRAND_COLORS, PLATFORM_SPECS, PRO_TIPS,
@@ -98,11 +98,13 @@ _TOP_CLEAN_RE = re.compile(r'^\d+\s+(Best|Top|Greatest|Most)\s+', re.IGNORECASE)
 _INVITE_HASH_RE = re.compile(r't\.me/\+([A-Za-z0-9_\-]+)')
 _JOINCHAT_HASH_RE = re.compile(r'joinchat/([A-Za-z0-9_\-]+)')
 
+# Core IPTV Terms for relevance filtering
+_CORE_TERMS = ["iptv", "tivimate", "smarters", "firestick", "m3u", "streaming", "buffer", "dns", "rebrand"]
+
 _DEDUP_PATH = os.path.join("data", "curator_dedup.jsonl")
 _DEDUP_CACHE: List[Dict[str, Any]] = []
 _POSTED_LINKS_CACHE: Set[str] = set()
 _POSTED_TITLES_HASH: Set[int] = set()
-_CORE_TERMS = ["iptv", "tivimate", "smarters", "firestick", "m3u"]
 
 import math
 
@@ -231,6 +233,11 @@ def _ai_allow_now() -> bool:
     # prune
     while _ai_calls_ts and _ai_calls_ts[0] < cutoff:
         _ai_calls_ts.pop(0)
+    
+    # Jitter/Savings: randomly skip 10% of calls to save credits and appear more human
+    if os.environ.get("AURA_AI_SAVINGS", "0") == "1" and random.random() < 0.1:
+        return False
+
     if len(_ai_calls_ts) < _AI_MAX_PER_MIN:
         _ai_calls_ts.append(now)
         return True
@@ -323,8 +330,27 @@ def validate_curator_env():
             logger.critical(e)
         raise SystemExit(1)
 
-STRICT_IPTV_KEYWORDS = ["iptv", "firestick", "tivimate", "smarters", "streaming", "buffering", "dns", "rebrand"]
-IPTV_FILTER_KEYWORDS = list(set(STRICT_IPTV_KEYWORDS + (REBRAND_KEYWORDS or []) + (URGENCY_KEYWORDS or []) + (COMMERCIAL_KEYWORDS or []) + (GUIDE_KEYWORDS or []) + (FIX_KEYWORDS or []) + (NEWS_KEYWORDS or [])))
+def get_iptv_filter_keywords():
+    from config import get_rules
+    rules = get_rules()
+    strict = ["iptv", "firestick", "tivimate", "smarters", "streaming", "buffering", "dns", "rebrand"]
+    return list(set(strict + 
+                    (rules.get("REBRAND_KEYWORDS", []) or []) + 
+                    (rules.get("URGENCY_KEYWORDS", []) or []) + 
+                    (rules.get("COMMERCIAL_KEYWORDS", []) or []) + 
+                    (rules.get("GUIDE_KEYWORDS", []) or []) + 
+                    (rules.get("FIX_KEYWORDS", []) or []) + 
+                    (rules.get("NEWS_KEYWORDS", []) or [])))
+
+def _is_junk(text: str) -> bool:
+    from config import get_rules
+    rules = get_rules()
+    s = (text or "").lower()
+    junk = rules.get("JUNK_KEYWORDS", [])
+    for w in (junk or []):
+        if w.lower() in s:
+            return True
+    return False
 
 COMPETITOR_TERMS = COMPETITOR_KEYWORDS or ["top 10 providers", "best sellers", "best providers", "top sellers", "alternative providers", "apollo", "xtream", "stb", "stbemu", "apollo group tv", "apollo group"]
 THREAD_MAP = {"#AuraNews": 9, "#AuraGuide": 4, "#AuraFix": 2, "#AuraUpdate": 3}
@@ -343,6 +369,8 @@ IMAGE_GEN_MODEL = os.environ.get("IMAGE_GEN_MODEL", "sdxl").strip()
  
 
 def classify_topic(title: str, description: str = "") -> Dict[str, Any]:
+    from config import get_rules
+    rules = get_rules()
     s = ((title or "") + " " + (description or "")).lower()
     
     # Priority for Update/Recap (AuraUpdate)
@@ -350,28 +378,18 @@ def classify_topic(title: str, description: str = "") -> Dict[str, Any]:
         m = TOPIC_MAP["update"]
         return {"topic": "update", "hashtag": m["hashtag"], "thread": m["thread"]}
         
-    if any(k in s for k in (GUIDE_KEYWORDS or [])):
+    if any(k in s for k in (rules.get("GUIDE_KEYWORDS", []) or [])):
         m = TOPIC_MAP["guide"]
         return {"topic": "guide", "hashtag": m["hashtag"], "thread": m["thread"]}
-    if any(k in s for k in (FIX_KEYWORDS or [])):
+    if any(k in s for k in (rules.get("FIX_KEYWORDS", []) or [])):
         m = TOPIC_MAP["fix"]
         return {"topic": "fix", "hashtag": m["hashtag"], "thread": m["thread"]}
-    if any(k in s for k in (NEWS_KEYWORDS or [])):
+    if any(k in s for k in (rules.get("NEWS_KEYWORDS", []) or [])):
         m = TOPIC_MAP["news"]
         return {"topic": "news", "hashtag": m["hashtag"], "thread": m["thread"]}
     h = assign_group_hashtag(title)
     th = THREAD_MAP.get(h) or THREAD_MAP.get("#AuraNews")
     return {"topic": "news", "hashtag": h, "thread": th}
-
-def is_high_value_topic(title: str) -> bool:
-    t = (title or "").lower()
-    hv = [
-        "tivimate vs smarters pro",
-        "isp throttling in uk/usa",
-        "optimizing iptv buffer size for 4k playback",
-        "setup guide: m3u vs stalker portal"
-    ]
-    return any(p in t for p in hv)
 
 async def get_pro_tip_for_topic(topic: str) -> str:
     """
@@ -448,16 +466,28 @@ def is_iptv_content(title: str, description: str = "") -> bool:
     return any(k in combined for k in _CORE_TERMS)
 
 def strict_iptv_allowed(title: str, description: str = "") -> bool:
+    from config import get_rules
+    rules = get_rules()
     s = ((title or "") + " " + (description or "")).lower()
-    return any(k.lower() in s for k in STRICT_IPTV_KEYWORDS)
+    strict = ["iptv", "firestick", "tivimate", "smarters", "streaming", "buffering", "dns", "rebrand"]
+    return any(k.lower() in s for k in strict)
 
 def competitor_banned(title: str, description: str = "") -> bool:
+    from config import get_rules
+    rules = get_rules()
     s = ((title or "") + " " + (description or "")).lower()
-    return any(k.lower() in s for k in COMPETITOR_TERMS)
+    comp = rules.get("COMPETITOR_KEYWORDS", [])
+    if not comp:
+        comp = ["top 10 providers", "best sellers", "best providers", "top sellers", "alternative providers", "apollo", "xtream", "stb", "stbemu", "apollo group tv", "apollo group"]
+    return any(k.lower() in s for k in comp)
+
 def safe_image_allowed(text: str) -> bool:
+    from config import get_rules
+    rules = get_rules()
     s = (text or "").lower()
     try:
-        for w in (JUNK_KEYWORDS or []):
+        junk = rules.get("JUNK_KEYWORDS", [])
+        for w in (junk or []):
             if (w or "").lower() in s:
                 return False
     except Exception as e:
@@ -525,8 +555,14 @@ async def _build_dynamic_tags_async(title: str, body: str) -> List[str]:
             break
     return out
 def generate_4k_image(title: str, concept_text: str = "") -> Optional[bytes]:
+    from config import get_rules
+    rules = get_rules()
     try:
-        topic = "guide" if any(k in (concept_text or title or "").lower() for k in GUIDE_KEYWORDS) else "fix" if any(k in (concept_text or title or "").lower() for k in FIX_KEYWORDS) else "news"
+        topic = "news"
+        combined = (concept_text or title or "").lower()
+        if any(k in combined for k in (rules.get("GUIDE_KEYWORDS", []) or [])): topic = "guide"
+        elif any(k in combined for k in (rules.get("FIX_KEYWORDS", []) or [])): topic = "fix"
+        
         t0 = time.time()
         main, platforms, metrics = generate_post_images(title, concept_text or "", topic)
         elapsed = time.time() - t0
@@ -1837,13 +1873,14 @@ async def post_to_channel(client: TelegramClient, channel_id: int, source: str, 
 
 async def count_today_posts(client: TelegramClient, channel_id: int) -> int:
     try:
-        msgs = await client.get_messages(channel_id, limit=100)
+        msgs = await client.get_messages(channel_id, limit=50)
         today = datetime.now(timezone.utc).date()
         c = 0
+        tags = ["#AuraNews", "#AuraGuide", "#AuraFix", "#AuraUpdate", "#AuraApex", "#ApexSupreme"]
         for m in msgs:
             dt = getattr(m, "date", None)
             txt = (getattr(m, "text", "") or "")
-            if dt and dt.date() == today and any(tag in txt for tag in ["#AuraApex", "#ApexSupreme"]):
+            if dt and dt.date() == today and any(tag in txt for tag in tags):
                 c += 1
         return c
     except Exception:
@@ -1917,11 +1954,11 @@ async def maybe_post_soft_sale(client: TelegramClient, channel_id: int, today_co
         return False
 
 # Market Windows (Aiden Lifecycle 2026)
-def is_within_market_window(dt: datetime.datetime) -> bool:
+def is_within_market_window(dt: datetime) -> bool:
     """Checks if current time is within any defined market window."""
     return get_target_topic_for_time(dt) is not None
 
-def get_target_topic_for_time(dt: datetime.datetime) -> Optional[str]:
+def get_target_topic_for_time(dt: datetime) -> Optional[str]:
     """Returns the expected topic for a given local time and day of week (Aiden Lifecycle)."""
     h = dt.hour
     m = dt.minute
@@ -2017,6 +2054,9 @@ async def curator_loop():
                 else:
                     logger.info(f"Curator status: {now.strftime('%H:%M')} {tz.key}. Market window: {in_window}. Target: {target_topic}")
                 
+                # Refresh post count from Telegram channel
+                today_count = await count_today_posts(client, channel_id)
+
                 # If we are in production and OUTSIDE any window, we should skip posting unless it's a critical update
                 if not testing_mode and not in_window:
                      # We still scrape because updates can happen anytime
@@ -2033,7 +2073,11 @@ async def curator_loop():
                         ("Reddit r/TiviMate", scrape_reddit_tivimate),
                         ("Reddit r/IPTV", scrape_reddit_iptv),
                     ]
-                    enabled = set((CONFIG_RULES.get("ENABLED_SOURCES") or []))
+                    
+                    # Refresh rules from config before scraping
+                    from config import get_rules
+                    _current_rules = get_rules()
+                    enabled = set((_current_rules.get("ENABLED_SOURCES") or []))
                     if enabled:
                         sources = [s for s in sources if s[0] in enabled]
                         

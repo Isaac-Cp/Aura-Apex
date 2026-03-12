@@ -10,7 +10,7 @@ from aura_core import setup_logging
 setup_logging()
 logger = logging.getLogger("ProcessManager")
 
-SCRIPTS = ["aura_apex_supreme.py", "aura_curator.py", "keep_alive.py"]
+SCRIPTS = ["aura_apex_supreme.py", "aura_curator.py"]
 PROCESSES = {}
 WEB_PROCESS = None
 
