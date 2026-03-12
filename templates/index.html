@@ -310,6 +310,108 @@
                 </h2>
                 <div id="heatmapChart" class="w-full h-40"></div>
             </div>
+
+            <!-- Restored: Performance Board & Scouter Radar -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <!-- Performance Board -->
+                <div class="glass rounded-2xl p-6 flex flex-col">
+                    <div class="flex justify-between items-center mb-6">
+                        <h2 class="text-lg font-bold text-white flex items-center gap-2 font-mono uppercase tracking-tight">
+                            <svg class="w-5 h-5 text-auraGold" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                            Performance
+                        </h2>
+                        <div class="flex gap-2">
+                            <button onclick="switchPerfTab('sources')" id="sourcesTabBtn" class="text-[10px] font-bold uppercase tracking-widest text-auraGold border-b-2 border-auraGold pb-1">Sources</button>
+                            <button onclick="switchPerfTab('keywords')" id="keywordsTabBtn" class="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-white transition-colors pb-1">Keywords</button>
+                        </div>
+                    </div>
+
+                    <div id="sourcesList" class="space-y-4 scroll-container-sm flex-1 pr-2">
+                        {% for term, kpi in source_kpis.items() %}
+                        <div class="bg-midnight p-3 rounded-xl border border-white/5 hover:border-auraGold/20 transition-all">
+                            <div class="flex justify-between items-center mb-2">
+                                <span class="text-sm font-mono text-auraGold">{{ term }}</span>
+                                <span class="text-xs text-slate-500 font-mono">{{ kpi.success_rate }}% SR</span>
+                            </div>
+                            <div class="w-full bg-deep rounded-full h-1.5 mb-2 overflow-hidden">
+                                <div class="h-1.5 rounded-full transition-all duration-1000 ease-out
+                                    {% if kpi.success_rate >= 75 %} bg-success shadow-[0_0_8px_rgba(0,230,118,0.4)]
+                                    {% elif kpi.success_rate >= 40 %} bg-auraGold shadow-[0_0_8px_rgba(255,215,0,0.4)]
+                                    {% else %} bg-danger shadow-[0_0_8px_rgba(255,82,82,0.4)] {% endif %}"
+                                    data-width="{{ kpi.success_rate or 0 }}%"></div>
+                            </div>
+                            <div class="flex justify-between text-[10px] font-mono text-slate-400">
+                                <span>Attempts: {{ kpi.attempts }}</span>
+                                <span>Success: {{ kpi.successes }}</span>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <div id="keywordsList" class="space-y-4 hidden scroll-container-sm flex-1 pr-2">
+                        <!-- Dynamic keywords here -->
+                    </div>
+                </div>
+
+                <!-- Apex Scouter Radar -->
+                <div class="lg:col-span-2 glass rounded-2xl overflow-hidden flex flex-col">
+                    <div class="px-6 py-4 border-b border-white/5 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                        <h2 class="text-lg font-bold text-white flex items-center gap-2 font-mono uppercase tracking-tight">
+                            <svg class="w-5 h-5 text-auraApexBlue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                            Apex Scouter Radar
+                        </h2>
+                        <div class="flex items-center gap-2 px-3 py-1 rounded-full bg-auraApexBlue/10 border border-auraApexBlue/20">
+                            <span class="w-2 h-2 rounded-full bg-auraApexBlue animate-ping"></span>
+                            <span class="text-[9px] font-bold text-auraApexBlue uppercase tracking-widest">Scanning Global Nodes</span>
+                        </div>
+                    </div>
+                    <div class="overflow-x-auto flex-1 scroll-container-sm">
+                        <table class="w-full text-left text-sm">
+                            <thead class="sticky-header">
+                                <tr class="text-slate-500 font-mono text-[10px] uppercase tracking-widest border-b border-white/5 shadow-sm">
+                                    <th class="px-6 py-4">Node / Group</th>
+                                    <th class="px-6 py-4">Link</th>
+                                    <th class="px-6 py-4">Population</th>
+                                    <th class="px-6 py-4">Detected</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-white/5">
+                                {% for target in potential_targets %}
+                                <tr class="hover:bg-white/5 transition-all group">
+                                    <td class="px-6 py-4 text-slate-300 font-bold group-hover:text-white">{{ target.title }}</td>
+                                    <td class="px-6 py-4 font-mono text-auraApexBlue">
+                                        <a href="{{ target.link }}" target="_blank" class="hover:underline flex items-center gap-1">
+                                            t.me/...
+                                            <svg class="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+                                        </a>
+                                    </td>
+                                    <td class="px-6 py-4 text-slate-400 font-mono">{{ target.members }}</td>
+                                    <td class="px-6 py-4 text-slate-500 text-[10px] font-mono">{{ target.time }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Top Lead Sources -->
+            <div class="glass rounded-2xl p-6 flex flex-col">
+                <h2 class="text-lg font-bold text-white mb-6 flex items-center gap-2 font-mono uppercase tracking-tight">
+                    <svg class="w-5 h-5 text-auraApexMagenta" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 12.414m0 0L9.172 8.172m4.242 4.242L18.364 7.757m-5.121 4.828L7.757 18.364"/></svg>
+                    Top Lead Sources
+                </h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 scroll-container-sm pr-2">
+                    {% for group in top_groups %}
+                    <div class="flex justify-between items-center text-xs font-mono bg-white/5 p-4 rounded-xl border border-white/5 hover:border-auraApexMagenta/30 transition-all group">
+                        <span class="text-slate-400 truncate max-w-[200px] group-hover:text-white transition-colors">{{ group.title }}</span>
+                        <span class="text-auraApexMagenta font-bold">{{ group.count }} Leads</span>
+                    </div>
+                    {% endfor %}
+                    {% if not top_groups %}
+                    <p class="col-span-full text-center text-slate-600 italic py-8">No group performance data captured yet.</p>
+                    {% endif %}
+                </div>
+            </div>
         </section>
 
         <!-- Tab Content: Outreach -->
@@ -513,53 +615,6 @@
                     </div>
                 </div>
             </div>
-
-            <!-- Scouter Radar -->
-            <div class="glass rounded-2xl overflow-hidden flex flex-col">
-                <div class="px-6 py-4 border-b border-white/5 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                    <h2 class="text-lg font-bold text-white flex items-center gap-2 font-mono uppercase tracking-tight">
-                        <svg class="w-5 h-5 text-auraApexBlue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
-                        Apex Scouter Radar
-                    </h2>
-                    <!-- Pulse Radar Indicator -->
-                    <div class="flex items-center gap-2 px-3 py-1 rounded-full bg-auraApexBlue/10 border border-auraApexBlue/20">
-                        <span class="w-2 h-2 rounded-full bg-auraApexBlue animate-ping"></span>
-                        <span class="text-[9px] font-bold text-auraApexBlue uppercase tracking-widest">Scanning Global Nodes</span>
-                    </div>
-                </div>
-                <div class="overflow-x-auto flex-1 scroll-container-sm">
-                    <table class="w-full text-left text-sm">
-                        <thead class="sticky-header">
-                            <tr class="text-slate-500 font-mono text-[10px] uppercase tracking-widest border-b border-white/5 shadow-sm">
-                                <th class="px-6 py-4">Node / Group</th>
-                                <th class="px-6 py-4">Link</th>
-                                <th class="px-6 py-4">Population</th>
-                                <th class="px-6 py-4">Detected</th>
-                            </tr>
-                        </thead>
-                        <tbody class="divide-y divide-white/5">
-                            {% for target in potential_targets %}
-                            <tr class="hover:bg-white/5 transition-all group">
-                                <td class="px-6 py-4 text-slate-300 font-bold group-hover:text-white">{{ target.title }}</td>
-                                <td class="px-6 py-4 font-mono text-auraApexBlue">
-                                    <a href="{{ target.link }}" target="_blank" class="hover:underline flex items-center gap-1">
-                                        t.me/...
-                                        <svg class="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
-                                    </a>
-                                </td>
-                                <td class="px-6 py-4 text-slate-400 font-mono">{{ target.members }}</td>
-                                <td class="px-6 py-4 text-slate-500 text-[10px] font-mono">{{ target.time }}</td>
-                            </tr>
-                            {% endfor %}
-                            {% if not potential_targets %}
-                            <tr>
-                                <td colspan="4" class="px-6 py-12 text-center text-slate-600 italic font-mono text-xs uppercase tracking-widest">Radar clear. No new nodes detected.</td>
-                            </tr>
-                            {% endif %}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
         </section>
 
         <!-- Tab Content: Settings -->
@@ -596,63 +651,6 @@
                             <div class="w-3 h-3 rounded-full bg-success animate-pulse shadow-[0_0_8px_rgba(0,230,118,0.5)]"></div>
                             GHOST ACTIVE
                         </button>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Performance & Sources -->
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                <!-- Source Performance -->
-                <div class="glass rounded-2xl p-6 space-y-6">
-                    <div class="flex justify-between items-center">
-                        <h2 class="text-lg font-bold text-white flex items-center gap-2 font-mono uppercase tracking-tight">
-                            <svg class="w-5 h-5 text-auraGold" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
-                            Performance
-                        </h2>
-                        <div class="flex gap-2">
-                            <button onclick="switchPerfTab('sources')" id="sourcesTabBtn" class="text-[10px] font-bold uppercase tracking-widest text-auraGold border-b-2 border-auraGold pb-1">Sources</button>
-                            <button onclick="switchPerfTab('keywords')" id="keywordsTabBtn" class="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-white transition-colors pb-1">Keywords</button>
-                        </div>
-                    </div>
-
-                    <div id="sourcesList" class="space-y-4 scroll-container-sm pr-2">
-                        {% for term, kpi in source_kpis.items() %}
-                        <div class="bg-midnight p-3 rounded-xl border border-white/5">
-                            <div class="flex justify-between items-center mb-2">
-                                <span class="text-sm font-mono text-auraGold">{{ term }}</span>
-                                <span class="text-xs text-slate-500 font-mono">{{ kpi.success_rate }}% SR</span>
-                            </div>
-                            <div class="w-full bg-deep rounded-full h-1.5 mb-2 overflow-hidden">
-                                <div class="h-1.5 rounded-full transition-all duration-1000 ease-out
-                                    {% if kpi.success_rate >= 75 %} bg-success shadow-[0_0_8px_rgba(0,230,118,0.4)]
-                                    {% elif kpi.success_rate >= 40 %} bg-auraGold shadow-[0_0_8px_rgba(255,215,0,0.4)]
-                                    {% else %} bg-danger shadow-[0_0_8px_rgba(255,82,82,0.4)] {% endif %}"
-                                    data-width="{{ kpi.success_rate or 0 }}%"></div>
-                            </div>
-                            <div class="flex justify-between text-[10px] font-mono text-slate-400">
-                                <span>Attempts: {{ kpi.attempts }}</span>
-                                <span>Success: {{ kpi.successes }}</span>
-                            </div>
-                        </div>
-                        {% endfor %}
-                        {% if not source_kpis %}
-                        <p class="text-slate-500 italic text-sm text-center">No source data available yet.</p>
-                        {% endif %}
-                    </div>
-                </div>
-
-                <div class="lg:col-span-2 glass rounded-2xl p-6 flex flex-col">
-                    <h2 class="text-[10px] font-bold text-slate-500 flex items-center gap-2 font-mono uppercase tracking-[0.2em] mb-4">
-                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 12.414m0 0L9.172 8.172m4.242 4.242L18.364 7.757m-5.121 4.828L7.757 18.364"/></svg>
-                        Top Lead Sources
-                    </h2>
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 scroll-container-sm pr-2">
-                        {% for group in top_groups %}
-                        <div class="flex justify-between items-center text-xs font-mono bg-white/5 p-3 rounded-xl border border-white/5 hover:border-auraGold/20 transition-all">
-                            <span class="text-slate-400 truncate max-w-[150px]">{{ group.title }}</span>
-                            <span class="text-auraGold font-bold">{{ group.count }} Leads</span>
-                        </div>
-                        {% endfor %}
                     </div>
                 </div>
             </div>
