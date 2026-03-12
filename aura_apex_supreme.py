@@ -43,7 +43,8 @@ from config import (
     API_ID, API_HASH, PHONE_NUMBER, GROQ_API_KEY,
     BANNED_ZONES, BANNED_CURRENCIES, JUNK_KEYWORDS, 
     TIER_3_CODES, TIER_1_INDICATORS, SENTIMENT_BLACKLIST, ADMIN_LEADS_CHANNEL_ID,
-    DB_FILE, BLACKLIST_FILE
+    DB_FILE, BLACKLIST_FILE, BUYER_PAIN_KEYWORDS, SELLER_SHIELD_TERMS, ESSENTIAL_HASHTAGS,
+    REBRAND_KEYWORDS, URGENCY_KEYWORDS, COMMERCIAL_KEYWORDS, COMPETITOR_KEYWORDS
 )
 from config import SESSION_STRING as CONFIG_SESSION_STRING
 
@@ -513,57 +514,7 @@ async def ensure_connected():
         logger.error(f"Failed to connect: {e}")
         _last_conn_status = False
         return False
-SELLER_SHIELD_TERMS = [
-    "reseller", "resellers", "reseller wanted", "reseller program",
-    "panel", "admin panel", "super admin", "billing panel", "dashboard",
-    "credits", "wholesale", "wholesale price", "supplier", "supplier hub",
-    "restream", "restreamer", "market", "marketplace", "trade hub",
-    "official replacement", "price list",
-    # Locale synonyms
-    "rivenditore", "rivenditori",
-    "distribuidor", "revendedores", "revenda",
-    "mayorista", "proveedor",
-    "grossiste", "revendeur",
-    "revendedor", "fornecedor",
-    "bayi"
-]
-BUYER_PAIN_KEYWORDS = [
-    # Direct Problem Solving (High Intent)
-    "Firestick setup guide",
-    "Android TV box buffering fix",
-    "Nvidia Shield best settings",
-    "TiviMate EPG missing",
-    "IBO Player playlist error",
-    "OTT Smarters login failed",
-    "VPN for streaming lag",
-    "TiviMate buffering Firestick fix",
-    "Shield TV IPTV stutter fix",
-    "IBO Player activation help",
-    "XCIPTV playlist not loading",
-    "Purple Player m3u setup",
-    
-    # Community & Reviews (High Trust)
-    "IPTV provider reviews reddit",
-    "Cord cutting community discussion",
-    "Best streaming apps 2025 forum",
-    "Tivimate users chat",
-    "Android Box support group",
-    "IPTV troubleshooting community",
-    
-    # Advanced Dorks (Google Search Operators)
-    'site:t.me "iptv" "discussion" -"seller"',
-    'site:t.me "tivimate" "support"',
-    'site:reddit.com "telegram group" "iptv"',
-    'inurl:t.me/joinchat "streaming" "help"',
-    'site:t.me "no selling" "iptv"',
-    'site:tgstat.com "iptv" "community"',
-    'site:telemetr.io "iptv" "chat"',
-    'site:reddit.com/r/IPTVdiscussion "t.me"',
-
-    # Short & Punchy (For Telethon Fallback)
-    "Tivimate", "Smarters", "Firestick", "Android TV", "IPTV Help",
-    "Buffering Fix", "Tech Support", "Cord Cutting", "Streaming"
-]
+# Market Keywords are now managed via config.py (rules.json)
 
 def _build_buyer_intent_keywords():
     base = list(BUYER_PAIN_KEYWORDS)
@@ -708,15 +659,8 @@ PROBLEM_TRIGGERS = [
     "server down", "buffering issue", "links expired", "help m3u not working", "service blocked", "need new provider",
     "buffering", "lagging", "freezing", "not working", "help", "black screen", "down", "offline"
 ]
-ESSENTIAL_HASHTAGS = [
-    "#IPTV", "#IPTV2025", "#IPTV2026", "#IPTVReseller", "#IPTVPanel", "#4KIPTV",
-    "#NoBuffering", "#CutTheCord", "#SportsStreaming", "#IPTVRebrand", "#WhiteLabelIPTV", "#M3U", "#XtreamCodes"
-]
-
-QC_GROUP_KEYWORDS = [
-    "IPTV support", "verified iptv panel", "catchup server quality", "anti-freeze iptv owner",
-    "iptv infrastructure hub", "stable iptv community", "iptv technical group", "sports iptv verified"
-]
+# Market Keywords are now managed via config.py (rules.json)
+# ESSENTIAL_HASHTAGS and QC_GROUP_KEYWORDS moved to rules.json/database
 
 MARKET_KEYWORDS = {
     "en-UK": {
@@ -835,6 +779,32 @@ async def init_db():
                       hits INTEGER DEFAULT 0,
                       conversions INTEGER DEFAULT 0,
                       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            await conn.execute('''CREATE TABLE IF NOT EXISTS tags
+                     (name TEXT PRIMARY KEY,
+                      hits INTEGER DEFAULT 0,
+                      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            # Pre-populate tags if empty
+            cur = await conn.execute("SELECT COUNT(*) FROM tags")
+            count = (await cur.fetchone())[0]
+            if count == 0:
+                initial_tags = [
+                    "IPTV support", "verified iptv panel", "catchup server quality", "anti-freeze iptv owner",
+                    "iptv infrastructure hub", "stable iptv community", "iptv technical group", "sports iptv verified"
+                ]
+                for t in initial_tags:
+                    await conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (t,))
+            
+            # Pre-populate keywords if empty
+            cur = await conn.execute("SELECT COUNT(*) FROM keywords")
+            count = (await cur.fetchone())[0]
+            if count == 0:
+                initial_keywords = [
+                    "iptv", "tivimate", "smarters", "apk", "firestick",
+                    "buffering", "dns", "m3u", "rebrand", "player", "epg"
+                ]
+                for k in initial_keywords:
+                    await conn.execute("INSERT OR IGNORE INTO keywords (term) VALUES (?)", (k,))
+            
             await conn.execute('''CREATE TABLE IF NOT EXISTS activity_log
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
                       ts DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1296,18 +1266,8 @@ try:
     client.session.save_entities = False
 except Exception:
     pass
-LEADS_JSON = 'leads.json'
-KEYWORD_TRIGGERS = ["buffer", "rebrand", "dns help", "provider down", "looking for fix"]
-TITLE_TARGET_KEYWORDS = ["fix", "iptv", "help", "setup"]
-SELLER_NEGATIVE_KEYWORDS = ["reseller", "panel", "credits", "wholesale", "restream", "source", "supplier", "official", "market", "b2b", "trade", "rivenditore", "distribuidor", "mayorista", "grossiste", "revendedor"]
-SELLER_NEGATIVE_KEYWORDS += ["recruitment", "become reseller", "opportunity", "earn", "profit", "white label panel", "partner program", "affiliate", "bulk", "marketing group", "dealer program", "franchise"]
-BLACKLIST_JOIN = ["spam", "crypto-pump", "adult"]
+# Scouter Missions & Keywords are now dynamic via DB and rules.json
 DB_QUEUE = asyncio.Queue()
-_SELLER_SHIELD_TERMS = ["reseller", "panel", "credits", "wholesale", "restream", "source", "supplier", "official", "market", "b2b", "trade", "rivenditore", "distribuidor", "mayorista", "grossiste", "revendedor"]
-_SELLER_SHIELD_TERMS += ["recruitment", "become reseller", "opportunity", "earn", "profit", "white label panel", "partner program", "affiliate", "bulk", "marketing group", "dealer program", "franchise"]
-_SELLER_SHIELD_TERMS_SET = set(k.lower() for k in _SELLER_SHIELD_TERMS)
-_TITLE_TARGET_KEYWORDS_SET = set(k.lower() for k in TITLE_TARGET_KEYWORDS)
-_BLACKLIST_JOIN_SET = set(k.lower() for k in BLACKLIST_JOIN)
 _MARKETING_ADV_HIGH = {"dm me","dm for service","dm for price","pm for price","inbox for price","order now","place order","order","price","prices","pricing"}
 _MARKETING_ADV_MED = {"buy","sell","subscribe","subscription","offer","deal","affiliate","bulk","dealer","franchise","supplier","restream","panel","credits","wholesale"}
 _MARKETING_LINKS = {"t.me","http","https"}
@@ -1740,7 +1700,7 @@ def compose_aiden_dm(snippet, group_title, tech_context=None, lead_score: int = 
     if len(words) > 120:
         msg = " ".join(words[:120])
     return re.sub(r'[\\u2600-\\u27BF\\U0001F300-\\U0001FAFF]+', lambda m: m.group(0) if m.group(0) in ['🤝','📺','⚡'] else '', msg)
-def _candidate_score(ident, title):
+async def _candidate_score(ident, title):
     try:
         s = 0
         tok = (ident or "").split('/')[-1]
@@ -1748,10 +1708,10 @@ def _candidate_score(ident, title):
             s += 30
         else:
             s -= 20
-        if any(k in (title or "").lower() for k in SELLER_SHIELD_TERMS):
+        if any(k in (title or "").lower() for k in (SELLER_SHIELD_TERMS or [])):
             s -= 100
         try:
-            kpis = load_json(SOURCE_KPIS_FILE, {})
+            kpis = await load_json_async(SOURCE_KPIS_FILE, {})
         except Exception as e:
             logger.debug(f"Failed to load KPIs: {e}")
             kpis = {}
@@ -1767,17 +1727,38 @@ def _candidate_score(ident, title):
     except Exception as e:
         logger.debug(f"Candidate score error: {e}")
         return 0
-def _title_hit(title):
+async def _get_db_keywords():
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            async with conn.execute("SELECT term FROM keywords") as cur:
+                rows = await cur.fetchall()
+                return [r[0].lower() for r in rows]
+    except Exception as e:
+        logger.debug(f"DB keywords fetch error: {e}")
+        return []
+
+async def _title_hit(title):
     t = (title or "").lower()
-    return any(k in t for k in _TITLE_TARGET_KEYWORDS_SET)
-def _title_buyer_hit(title):
+    # Check rules.json/config.py first
+    if any(k in t for k in (REBRAND_KEYWORDS or [])): return True
+    if any(k in t for k in (URGENCY_KEYWORDS or [])): return True
+    if any(k in t for k in (COMMERCIAL_KEYWORDS or [])): return True
+    # Check DB Keywords
+    db_kws = await _get_db_keywords()
+    return any(k in t for k in db_kws)
+
+async def _title_buyer_hit(title):
     t = (title or "").lower()
-    return any(k.lower() in t for k in BUYER_PAIN_KEYWORDS)
-def _blacklisted(title):
+    return any(k.lower() in t for k in (BUYER_PAIN_KEYWORDS or []))
+
+async def _blacklisted(title):
     t = (title or "").lower()
-    if any(k in t for k in _BLACKLIST_JOIN_SET):
-        return True
-    return any(k in t for k in _SELLER_SHIELD_TERMS_SET)
+    # Check Intelligence Blacklist (rules.json)
+    if any(k in t for k in (SENTIMENT_BLACKLIST or [])): return True
+    if any(k in t for k in (JUNK_KEYWORDS or [])): return True
+    # Check Seller Shield (rules.json)
+    if any(k.lower() in t for k in (SELLER_SHIELD_TERMS or [])): return True
+    return False
 async def _log_join_event_async(link, title, status, reason):
     try:
         items = await load_json_async(JOIN_ATTEMPTS_LOG, [])
@@ -2161,7 +2142,7 @@ async def discover_fan_groups_via_telethon(limit_per_kw: int = 10) -> List[Dict[
                             uncertain = True
                     else:
                         uncertain = True
-                    if members and members > 100 and _title_hit(title) and not _blacklisted(title):
+                    if members and members > 100 and await _title_hit(title) and not await _blacklisted(title):
                         out.append({"link": f"https://t.me/{uname}", "title": title, "members": members, "source": "telethon_search", "uncertain": uncertain})
                 except Exception:
                     continue
@@ -2327,7 +2308,7 @@ async def directory_scraper_loop():
                         buyer_ok = _buyer_intent_texts([title, about])
                         if not buyer_ok:
                             continue
-                        if members and members > 100 and _title_hit(title) and not _blacklisted(title):
+                        if members and members > 100 and await _title_hit(title) and not await _blacklisted(title):
                             _save_potential(ln, title, members, "directory")
                             log_activity("spider_discovered", f"{title}:{members}")
                     except Exception:
@@ -2370,7 +2351,7 @@ async def spider_discover_once(max_keywords=3, max_links_per_kw=8, telethon_peek
                     else:
                         title = "iptv help setup fix"
                         members = 101
-                    if members and members > 100 and not _blacklisted(title):
+                    if members and members > 100 and not await _blacklisted(title):
                         _save_potential(ln, title, members, "directory")
                         log_activity("spider_discovered", f"{title}:{members}")
                         discovered += 1
@@ -2387,7 +2368,7 @@ async def spider_discover_once(max_keywords=3, max_links_per_kw=8, telethon_peek
                 members = int(rec.get("members") or 0)
                 source = rec.get("source") or "telethon_search"
                 uncertain = bool(rec.get("uncertain"))
-                if members and members > 100 and not _blacklisted(title):
+                if members and members > 100 and not await _blacklisted(title):
                     _save_potential(ln, title, members, source)
                     log_activity("spider_discovered", f"{title}:{members}")
                     discovered += 1
@@ -2423,7 +2404,7 @@ async def spider_discover_once(max_keywords=3, max_links_per_kw=8, telethon_peek
                     full_chat = getattr(full, 'full_chat', None)
                     title = getattr(getattr(full, 'chats', [{}])[0], 'title', '') or ''
                     members = getattr(full_chat, 'participants_count', 0) or 0
-                if members and members > 100 and not _blacklisted(title):
+                if members and members > 100 and not await _blacklisted(title):
                     _save_potential(ln, title, members, "reddit_bridge")
                     log_activity("spider_discovered", f"{title}:{members}")
                     discovered += 1
@@ -2986,7 +2967,7 @@ async def user_discovery_loop():
                 
                 # Pre-Gatekeeper: Seller-Shield (Title Scan)
                 title = getattr(ch, "title", "") or ""
-                if _blacklisted(title):
+                if await _blacklisted(title):
                      # Add to REJECTED immediately to avoid re-scan
                      try:
                          rej = await load_json_async(REJECTED_GROUPS, [])
@@ -2999,7 +2980,7 @@ async def user_discovery_loop():
                      if os.environ.get("AURA_MODE", "").lower() == "testing":
                         logger.info(f"🚫 [Gatekeeper] Skipped Seller Hub: {title}")
                      continue
-                if not _title_buyer_hit(title):
+                if not await _title_buyer_hit(title):
                     # Skip low buyer-intent titles
                     try:
                         rej = await load_json_async(REJECTED_GROUPS, [])
@@ -3037,7 +3018,15 @@ async def user_discovery_loop():
             except Exception:
                 cd = {}
             global_cool = cd.get("__global__")
-            q_sorted = sorted(q, key=lambda it: (-_candidate_score(it.get("id"), it.get("title")), it.get("retry_after", 0)))
+            
+            # Pre-calculate scores for sorting since _candidate_score is now async
+            scored_q = []
+            for it in q:
+                score = await _candidate_score(it.get("id"), it.get("title"))
+                scored_q.append((score, it))
+            
+            q_sorted = [item[1] for item in sorted(scored_q, key=lambda x: (-x[0], x[1].get("retry_after", 0)))]
+            
             if global_cool and float(global_cool) > now_t:
                 q_sorted = [it for it in q_sorted if ('joinchat' in (it.get('id') or '')) or ((it.get('id') or '').split('/')[-1]).startswith('+')]
             q_ready = [it for it in q_sorted if float(it.get("retry_after", 0) or 0) <= now_t]
@@ -3290,7 +3279,7 @@ async def handle_v21_logic(event):
                             members = getattr(full_chat, 'participants_count', 0) or 0
                         except Exception:
                             continue
-                    if members and members > 100 and _title_hit(title) and not _blacklisted(title):
+                    if members and members > 100 and await _title_hit(title) and not await _blacklisted(title):
                         _save_potential(ln, title, members, group_id)
                 except Exception:
                     pass
@@ -4198,7 +4187,18 @@ async def main():
         link = os.environ.get("QC_GROUP_LINK", "").strip()
         if not link:
             try:
-                res = await client(functions.contacts.SearchRequest(q=random.choice(QC_GROUP_KEYWORDS), limit=20))
+                # Fetch tags from database for searching
+                try:
+                    async with aiosqlite.connect(DB_FILE) as conn:
+                        async with conn.execute("SELECT name FROM tags") as cur:
+                            rows = await cur.fetchall()
+                            db_tags = [r[0] for r in rows]
+                except Exception as e:
+                    logger.debug(f"DB Tags fetch error: {e}")
+                    db_tags = QC_GROUP_KEYWORDS
+                
+                kw = random.choice(db_tags) if db_tags else random.choice(QC_GROUP_KEYWORDS)
+                res = await client(functions.contacts.SearchRequest(q=kw, limit=20))
                 chats = getattr(res, 'chats', []) or []
                 for ch in chats:
                     uname = getattr(ch, "username", None)
@@ -4292,7 +4292,7 @@ async def main():
                 members = int(it.get("members", 0) or 0)
                 if not link or members < 100:
                     continue
-                if _blacklisted(title):
+                if await _blacklisted(title):
                     continue
                 if await joined_link_exists(link):
                     continue
@@ -4337,7 +4337,17 @@ async def main():
     async def qc_group_autojoin_loop():
         while True:
             try:
-                kw = random.choice(QC_GROUP_KEYWORDS)
+                # Fetch tags from database for searching
+                try:
+                    async with aiosqlite.connect(DB_FILE) as conn:
+                        async with conn.execute("SELECT name FROM tags") as cur:
+                            rows = await cur.fetchall()
+                            db_tags = [r[0] for r in rows]
+                except Exception as e:
+                    logger.debug(f"DB Tags fetch error: {e}")
+                    db_tags = QC_GROUP_KEYWORDS
+                
+                kw = random.choice(db_tags) if db_tags else random.choice(QC_GROUP_KEYWORDS)
                 res = await client(functions.contacts.SearchRequest(q=kw, limit=25))
                 chats = getattr(res, 'chats', []) or []
                 stats = load_json(STATS_FILE, apex_supreme_stats)
@@ -4537,7 +4547,7 @@ async def cmd_scout_join(event):
             members = int(it.get("members", 0) or 0)
             if not link or members < 100:
                 continue
-            if _blacklisted(title):
+            if await _blacklisted(title):
                 continue
             if await joined_link_exists(link):
                 continue

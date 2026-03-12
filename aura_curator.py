@@ -25,7 +25,9 @@ from zoneinfo import ZoneInfo
 from aura_core import setup_logging
 from config import (
     API_ID, API_HASH, SESSION_STRING, GROQ_API_KEY, CURATOR_CHANNEL_ID, JUNK_KEYWORDS,
-    REQUEST_TIMEOUT, CHECK_INTERVAL_SECONDS, BRAND_COLORS, PLATFORM_SPECS, PRO_TIPS
+    REQUEST_TIMEOUT, CHECK_INTERVAL_SECONDS, BRAND_COLORS, PLATFORM_SPECS, PRO_TIPS,
+    REBRAND_KEYWORDS, URGENCY_KEYWORDS, COMMERCIAL_KEYWORDS, COMPETITOR_KEYWORDS,
+    BUYER_PAIN_KEYWORDS, SELLER_SHIELD_TERMS, GUIDE_KEYWORDS, FIX_KEYWORDS, NEWS_KEYWORDS
 )
 from config import rules as CONFIG_RULES
 
@@ -321,23 +323,12 @@ def validate_curator_env():
             logger.critical(e)
         raise SystemExit(1)
 
-IPTV_FILTER_KEYWORDS = [
-    "iptv", "tivimate", "smarters", "apk", "firestick",
-    "buffering", "dns", "m3u", "rebrand", "player", "epg",
-    "xtream codes", "hardcoded", "ott navigator", "implayer", "sparkle",
-    "nvidia shield", "formuler", "mag box", "android tv",
-    "reseller", "panel", "credits", "white label", "billing",
-    "streaming", "update", "firmware", "setup", "tutorial"
-]
-
 STRICT_IPTV_KEYWORDS = ["iptv", "firestick", "tivimate", "smarters", "streaming", "buffering", "dns", "rebrand"]
-COMPETITOR_TERMS = ["top 10 providers", "best sellers", "best providers", "top sellers", "alternative providers", "apollo", "xtream", "stb", "stbemu", "apollo group tv", "apollo group"]
+IPTV_FILTER_KEYWORDS = list(set(STRICT_IPTV_KEYWORDS + (REBRAND_KEYWORDS or []) + (URGENCY_KEYWORDS or []) + (COMMERCIAL_KEYWORDS or []) + (GUIDE_KEYWORDS or []) + (FIX_KEYWORDS or []) + (NEWS_KEYWORDS or [])))
+
+COMPETITOR_TERMS = COMPETITOR_KEYWORDS or ["top 10 providers", "best sellers", "best providers", "top sellers", "alternative providers", "apollo", "xtream", "stb", "stbemu", "apollo group tv", "apollo group"]
 THREAD_MAP = {"#AuraNews": 9, "#AuraGuide": 4, "#AuraFix": 2, "#AuraUpdate": 3}
 DYNAMIC_THREAD_MAP = {}
-
-GUIDE_KEYWORDS = ["tivimate", "smarters", "ibo", "ott", "m3u", "setup", "tutorial", "how to"]
-FIX_KEYWORDS = ["isp", "throttling", "vpn", "handshake", "error", "fix", "buffering"]
-NEWS_KEYWORDS = ["crackdown", "news", "update", "new channels", "broadcasting", "global"]
 TOPIC_MAP = {
     "guide": {"hashtag": "#AuraGuide", "thread": 4},
     "fix": {"hashtag": "#AuraFix", "thread": 2},
@@ -359,13 +350,13 @@ def classify_topic(title: str, description: str = "") -> Dict[str, Any]:
         m = TOPIC_MAP["update"]
         return {"topic": "update", "hashtag": m["hashtag"], "thread": m["thread"]}
         
-    if any(k in s for k in GUIDE_KEYWORDS):
+    if any(k in s for k in (GUIDE_KEYWORDS or [])):
         m = TOPIC_MAP["guide"]
         return {"topic": "guide", "hashtag": m["hashtag"], "thread": m["thread"]}
-    if any(k in s for k in FIX_KEYWORDS):
+    if any(k in s for k in (FIX_KEYWORDS or [])):
         m = TOPIC_MAP["fix"]
         return {"topic": "fix", "hashtag": m["hashtag"], "thread": m["thread"]}
-    if any(k in s for k in NEWS_KEYWORDS):
+    if any(k in s for k in (NEWS_KEYWORDS or [])):
         m = TOPIC_MAP["news"]
         return {"topic": "news", "hashtag": m["hashtag"], "thread": m["thread"]}
     h = assign_group_hashtag(title)
