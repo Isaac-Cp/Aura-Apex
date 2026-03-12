@@ -1,18 +1,14 @@
-from typing import Optional, List, Dict, Any, Union, Tuple
+from typing import Optional, List, Dict, Any, Tuple
 from collections import deque
 import asyncio
 import logging
 import random
 import sys
-import datetime
+from datetime import datetime, timezone, timedelta
 import os
 import re
 import time
-from dotenv import load_dotenv
-
-load_dotenv()
-os.environ["AURA_MODE"] = "testing"
-os.environ["STOP_OUTREACH"] = "0"
+import json
 import zlib
 import urllib.parse
 import ssl
@@ -21,7 +17,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 import aiosqlite
 from zoneinfo import ZoneInfo
-
+from dotenv import load_dotenv
 from telethon import TelegramClient, events, functions
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
@@ -30,12 +26,30 @@ from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelReque
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl import types
-from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings, ReactionEmoji, UserStatusOffline, UserStatusOnline, UserStatusRecently, UserStatusLastWeek, UserStatusLastMonth
-from telethon.errors import FloodWaitError, UserPrivacyRestrictedError, PeerIdInvalidError, YouBlockedUserError, UserBannedInChannelError, ChatWriteForbiddenError, ChannelPrivateError, PeerFloodError
+from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings, ReactionEmoji, UserStatusOffline, UserStatusOnline, UserStatusRecently
+from telethon.errors import FloodWaitError, UserPrivacyRestrictedError, PeerIdInvalidError, UserBannedInChannelError, ChatWriteForbiddenError, ChannelPrivateError, PeerFloodError
 from telethon.tl.functions.contacts import BlockRequest
 from fake_useragent import UserAgent
 from groq import AsyncGroq
 from deep_translator import GoogleTranslator
+
+# Custom modules
+from aura_core import (
+    proxy_health_monitor, should_outreach, load_json, save_json, clean_old_logs_async,
+    calculate_lead_score, setup_logging, load_json_async, save_json_async
+)
+from keep_alive import keep_alive
+from config import (
+    API_ID, API_HASH, PHONE_NUMBER, GROQ_API_KEY,
+    BANNED_ZONES, BANNED_CURRENCIES, JUNK_KEYWORDS, 
+    TIER_3_CODES, TIER_1_INDICATORS, SENTIMENT_BLACKLIST, ADMIN_LEADS_CHANNEL_ID,
+    DB_FILE, BLACKLIST_FILE
+)
+from config import SESSION_STRING as CONFIG_SESSION_STRING
+
+load_dotenv()
+os.environ["AURA_MODE"] = "testing"
+os.environ["STOP_OUTREACH"] = "0"
 
 try:
     import praw
@@ -45,21 +59,6 @@ try:
     import psutil
 except Exception:
     psutil = None
-
-# Custom modules
-from aura_core import (
-    proxy_health_monitor, should_outreach, load_json, save_json, clean_old_logs_async,
-    calculate_lead_score, REBRAND_KEYWORDS, URGENCY_KEYWORDS, COMPETITOR_KEYWORDS,
-    setup_logging, load_json_async, save_json_async
-)
-from keep_alive import keep_alive
-from config import (
-    API_ID, API_HASH, PHONE_NUMBER, GROQ_API_KEY,
-    BANNED_ZONES, BANNED_CURRENCIES, JUNK_KEYWORDS, 
-    TIER_3_CODES, TIER_1_INDICATORS, URGENCY_KEYWORDS, SENTIMENT_BLACKLIST, ADMIN_LEADS_CHANNEL_ID,
-    DB_FILE, MARKET_KEYWORDS
-)
-from config import SESSION_STRING as CONFIG_SESSION_STRING
 
 # Logging Setup
 setup_logging()
@@ -184,41 +183,87 @@ def _fallback_dm(lead_name: str, group_name: str, user_msg: str, lead_score: int
     base = "{Hey|Yo|Quick one}, saw your post in " + str(group_name) + ". {Want a quick tip?|Want a tiny checklist?|Can I send a tiny fix plan?}"
     return _sanitize_dm(_spin(base))
 
-async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_score: int, context_hint: str, style_hint: str, stealth: bool = False) -> str:
+async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_score: int, context_hint: str, style_hint: str, stealth: bool = False, message_ts: str = None) -> str:
     if not ai_client:
         return _fallback_dm(lead_name, group_name, user_msg, lead_score)
     if not _ai_dm_allow():
         return _fallback_dm(lead_name, group_name, user_msg, lead_score)
-    tech_trigger = ""
-    if "tivimate" in (user_msg or "").lower():
-        tech_trigger = "Mention TiviMate User-Agent settings."
-    if "firestick" in (user_msg or "").lower():
-        tech_trigger = "Mention Firestick cache and background limits."
-    intent_focus = "Help them fix the lag/buffering peer-to-peer."
-    if lead_score >= 8:
-        intent_focus = "Pivot the conversation toward why branded apps with hardcoded DNS are more stable than generic Smarters/XC apps."
-    local_prompt = SYSTEM_PROMPT
-    if stealth:
-        local_prompt += "\nStealth mode: avoid any commercial wording; sound like a peer sharing a fix."
-    up = (
-        f"Lead: {lead_name} (found in {group_name})\n"
-        f"Message: \"{user_msg}\"\n"
-        f"Tech Hook: {tech_trigger}\n"
-        f"Focus: {intent_focus} {style_hint}. {context_hint}\n"
-        f"Constraint: 3 sentences max. Lowercase tech terms. End with a question about their ISP or device."
+
+    # Calculate message age and strategy type
+    days_old = 0
+    if message_ts:
+        try:
+            # Handle ISO format like 2026-03-09T20:28:39+00:00
+            ts = datetime.datetime.fromisoformat(message_ts.replace('Z', '+00:00'))
+            now = datetime.now(timezone.utc)
+            days_old = (now - ts).days
+        except Exception:
+            days_old = 0
+    
+    strategy_type = 'FRESH' if days_old < 2 else 'OLD'
+    
+    # Aiden Role & Behavioral Logic
+    system_role = (
+        "### ROLE\n"
+        "Your goal is to convert a lead from a Telegram group into a private discussion about IPTV infrastructure.\n\n"
+        "### SYSTEM PROMPT\n"
+        "You are \"Aiden,\" the technical architect for Streamexpert. You are messaging a lead privately after seeing their message in a group.\n\n"
+        "### BEHAVIORAL LOGIC\n"
+        "IF STRATEGY_TYPE is 'FRESH':\n"
+        "- Open immediately with a technical diagnosis of the LEAD_MESSAGE.\n"
+        "- Use a \"Notification-First\" strategy: No greetings (like Hi/Hello), just technical value.\n"
+        "- Goal: Immediate problem-solving.\n"
+        "- THE \"NOTIFICATION PREVIEW\" RULE (First 40 Words): The first two sentences MUST be purely technical and specific to the [LEAD_MESSAGE].\n"
+        "  - Do NOT start with \"Hi,\" \"Hello,\" or \"I saw your message.\"\n"
+        "  - START with the technical problem or a direct observation of their pain point.\n"
+        "  - Objective: The user must see a technical solution in their phone's notification bar.\n"
+        "- OUTPUT CONSTRAINTS: TOTAL LENGTH 60–90 words. Exactly 4–5 sentences. Double line breaks between EVERY sentence.\n\n"
+        "IF STRATEGY_TYPE is 'OLD':\n"
+        "- Open by referencing the GROUP_NAME and the fact that you were catching up on old messages.\n"
+        "- Use the \"Peer Follow-up\" strategy: Ask \"Did you ever get that sorted?\"\n"
+        "- Goal: Re-ignite a cold problem with an expert solution.\n"
+        "- OUTPUT CONSTRAINTS: TOTAL LENGTH 50–80 words. Exactly 4–5 sentences. Double line breaks between EVERY sentence.\n\n"
+        "### COMMON CONSTRAINTS (CRITICAL)\n"
+        "- FORMATTING: Double line breaks between EVERY sentence.\n"
+        "- NO PREAMBLE: Start the message immediately.\n"
+        "- NO-FLY ZONE: No \"Dear,\" \"Hope you're well,\" or \"I am a bot.\"\n\n"
+        "### MESSAGE STRUCTURE (FRESH)\n"
+        "0. Context integration: Start the message by subtly mentioning that you noticed their specific problem (LEAD_MESSAGE) in the GROUP_NAME. This provides context on why you are messaging, but it MUST be integrated into the technical hook so that the \"Notification Preview\" rule is still satisfied.\n"
+        "1. [Sentence 1 - The Hook]: Direct technical observation based on their specific message.\n"
+        "2. [Sentence 2 - The Why]: Brief \"expert\" explanation of the backend cause (e.g., DNS, Throttling, Panel limits).\n"
+        "3. [Sentence 3 - The Flex]: Mention a Streamexpert USP (Unlimited Credits / Trex / Crystal / Custom Apps).\n"
+        "4. [Sentence 4/5 - The CTA]: One low-pressure question about a video demo or interface breakdown.\n\n"
+        "### MESSAGE STRUCTURE (OLD)\n"
+        "1. [Sentence 1 - Open]: Reference the GROUP_NAME and catching up.\n"
+        "2. [Sentence 2 - Follow-up]: \"Did you ever get that sorted?\"\n"
+        "3. [Sentence 3 - The Flex]: Mention either 'Unlimited Credit Panels' or 'Custom App Rebranding (iOS/Android/SmartTV)'.\n"
+        "4. [Sentence 4/5 - The CTA]: Ask for permission to send a video demo of the Streamexpert interface."
     )
+
+    user_data = (
+        "### INPUT DATA\n"
+        f"- LEAD_MESSAGE: \"\"\"{user_msg}\"\"\"\n"
+        f"- GROUP_NAME: {group_name}\n"
+        f"- MESSAGE_AGE: {days_old} days\n"
+        f"- STRATEGY_TYPE: {strategy_type}\n"
+        f"- LEAD_USERNAME: @{lead_name if not str(lead_name).isdigit() else 'User'}\n\n"
+        "### OUTPUT\n"
+        "Generate the outreach now, starting with the technical hook if FRESH, or the peer follow-up if OLD. Start the message immediately."
+    )
+
     try:
         resp = await ai_client.chat.completions.create(
             messages=[
-                {"role": "system", "content": local_prompt},
-                {"role": "user", "content": up}
+                {"role": "system", "content": system_role},
+                {"role": "user", "content": user_data}
             ],
             model="llama-3.3-70b-versatile",
-            temperature=0.8,
-            max_tokens=80
+            temperature=0.7,
+            max_tokens=150
         )
         dm = (resp.choices[0].message.content or "").strip()
-        return _sanitize_dm(dm)
+        # Use a less aggressive sanitizer for new professional outreach
+        return _sanitize_outreach(dm)
     except Exception as e:
         if "429" in str(e):
             logger.warning("Groq Rate Limit (429). Waiting 5s before retry...")
@@ -226,39 +271,26 @@ async def generate_ai_dm(lead_name: str, group_name: str, user_msg: str, lead_sc
         try:
             resp = await ai_client.chat.completions.create(
                 messages=[
-                    {"role": "system", "content": local_prompt},
-                    {"role": "user", "content": up}
+                    {"role": "system", "content": system_role},
+                    {"role": "user", "content": user_data}
                 ],
                 model="llama-3.3-70b-versatile",
-                temperature=0.8,
-                max_tokens=80
+                temperature=0.7,
+                max_tokens=150
             )
             dm = (resp.choices[0].message.content or "").strip()
-            return _sanitize_dm(dm)
+            return _sanitize_outreach(dm)
         except Exception as e2:
-            if "429" in str(e2):
-                logger.warning("Groq Rate Limit (429) persistent. Falling back to Gemini/Templates.")
-            else:
-                logger.debug(f"AI DM generation failed: {e2}")
-            try:
-                key = (os.environ.get("GEMINI_API_KEY") or "").strip()
-                if key:
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={key}"
-                    payload = {"contents":[{"parts":[{"text": local_prompt + "\n\n" + up}]}]}
-                    async with aiohttp.ClientSession() as sess:
-                        async with sess.post(url, json=payload, timeout=20) as r:
-                            if r.status == 200:
-                                data = await r.json()
-                                text = ""
-                                try:
-                                    text = data["candidates"][0]["content"]["parts"][0]["text"]
-                                except Exception:
-                                    text = ""
-                                if text:
-                                    return _sanitize_dm(text)
-            except Exception:
-                pass
+            logger.debug(f"AI DM generation failed: {e2}")
             return _sanitize_dm(_fallback_dm(lead_name, group_name, user_msg, lead_score))
+
+def _sanitize_outreach(dm: str) -> str:
+    """Less aggressive sanitizer for professional outreach that preserves case and formatting."""
+    # Remove T.me links for safety
+    dm = _TME_SANITIZE_RE.sub('', dm)
+    # Ensure double line breaks are preserved (or added if missing between sentences)
+    # But for now, just trust the AI and strip extra whitespace
+    return dm.strip()
 DM_ATTEMPTS_LOG = "dm_attempts.json"
 DM_COOLDOWN_HOURS = 48
 
@@ -342,10 +374,10 @@ async def safe_send_dm(client: Any, peer: Any, message: str, tzinfo: Any = None)
     if tzinfo is None:
         tzinfo = _market_tzinfo()
     try:
-        local_hour = datetime.datetime.now(tzinfo).hour if tzinfo else datetime.datetime.now().hour
+        local_hour = datetime.now(tzinfo).hour if tzinfo else datetime.now().hour
     except Exception as e:
         logger.debug(f"Timezone error, falling back to local: {e}")
-        local_hour = datetime.datetime.now().hour
+        local_hour = datetime.now().hour
     if _quiet_hours(local_hour):
         logs.append({"ts": _now_ts(), "peer_id": uid, "status": "skipped", "reason": "quiet_hours"})
         await _save_dm_log_async(logs)
@@ -548,16 +580,31 @@ def _build_buyer_intent_keywords():
     return list(dict.fromkeys(base))
 BUYER_INTENT_KEYWORDS = _build_buyer_intent_keywords()
 def _buyer_intent_texts(texts):
+    """Merged buyer intent check."""
     t = " ".join([(x or "").lower() for x in texts if x]).strip()
     if not t:
         return False
+        
+    # Check seller shield terms first
+    if any(k.lower() in t for k in (SELLER_SHIELD_TERMS if 'SELLER_SHIELD_TERMS' in locals() else [])):
+        return False
+        
+    # Check general buyer signals
     signals = [
         "help", "support", "setup", "guide", "fix", "buffering", "issues",
         "community", "chat", "discussion", "question", "problem", "solution",
         "faq", "rules", "q&a", "how to", "no selling", "not a seller", "discussion only",
         "official group", "buyers", "users", "members", "tips", "tricks"
     ]
-    return any(k in t for k in signals)
+    if any(k in t for k in signals):
+        return True
+        
+    # Check specific buyer pain keywords
+    hit = 0
+    for k in (BUYER_PAIN_KEYWORDS if 'BUYER_PAIN_KEYWORDS' in locals() else []):
+        if k.lower() in t:
+            hit += 1
+    return hit >= 1
 
 
 # Specialized Scouters & Keyword Matrix
@@ -1146,7 +1193,7 @@ def market_hour_ok():
         if os.environ.get("AURA_MODE", "").lower() == "testing":
             return True
         tz = _market_tzinfo()
-        h = datetime.datetime.now(tz).hour
+        h = datetime.now(tz).hour
         return 9 <= h <= 21
     except Exception:
         return True
@@ -1202,7 +1249,7 @@ apex_supreme_stats = {
     "bots_queried": 0,
     "tier_1_leads": 0,
     "day_counter": 1,
-    "last_report": str(datetime.datetime.now()),
+    "last_report": str(datetime.now()),
     "qc_groups": []
 }
 
@@ -1343,7 +1390,7 @@ async def _code_callback():
 def add_to_blacklist(user_id):
     try:
         with open(BLACKLIST_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"{user_id},{datetime.datetime.now().isoformat()}\n")
+            f.write(f"{user_id},{datetime.now().isoformat()}\n")
     except Exception as e:
         logger.debug(f"Failed to add to blacklist: {e}")
 
@@ -1462,7 +1509,8 @@ async def _output_status(status_text):
                 except Exception:
                     await client.send_message(ch, status_text)
                     return
-            await client.send_message('me', status_text)
+        # Sent status logs to 'me' disabled as per user request
+        # await client.send_message('me', status_text)
     except Exception as e:
         logger.debug(f"Failed to output status: {e}")
 def _provider_advertising(text):
@@ -1568,7 +1616,6 @@ def _user_entity_audit(user):
             return True
             
         # Common Bot name patterns (more specific to avoid false positives)
-        bot_indicators = ["bot", "keeper", "admin", "helper", "service", "support", "official"]
         # If 'bot' is a standalone word in name or part of bot-like username
         if "bot" in u.split("_") or "bot" in u.split("-"):
             return True
@@ -1863,7 +1910,7 @@ async def _save_potential_async(link, title, members, source_gid):
             "title": title,
             "members": members,
             "source_group_id": source_gid,
-            "discovered_at": datetime.datetime.now().isoformat()
+            "discovered_at": datetime.now().isoformat()
         })
         await save_json_async(POTENTIAL_TARGETS, items)
     except Exception as e:
@@ -2633,7 +2680,8 @@ async def gatekeeper(chat_ref: Any) -> Tuple[bool, str]:
                 if any(k in pre_text for k in trade_terms):
                     try:
                         nm = (title or "Unknown").strip() or "Unknown"
-                        await client.send_message('me', f"🚫 [Gatekeeper] Skipped Seller Hub: {nm}")
+                # Status updates to 'me' disabled
+                # await client.send_message('me', f"🚫 [Gatekeeper] Skipped Seller Hub: {nm}")
                     except Exception:
                         pass
                     try:
@@ -2647,7 +2695,8 @@ async def gatekeeper(chat_ref: Any) -> Tuple[bool, str]:
                 if ("official" in pre_text) and any(sym in pre_text for sym in ["$", "€", "£", "price"]):
                     try:
                         nm = (title or "Unknown").strip() or "Unknown"
-                        await client.send_message('me', f"🚫 [Gatekeeper] Skipped Seller Hub: {nm}")
+                # Status updates to 'me' disabled
+                # await client.send_message('me', f"🚫 [Gatekeeper] Skipped Seller Hub: {nm}")
                     except Exception:
                         pass
                     try:
@@ -2787,7 +2836,7 @@ async def gatekeeper(chat_ref: Any) -> Tuple[bool, str]:
         total_q_score = calculate_quality_score(combined_text) + (tech_hits * 5)
 
         if not override:
-            now_ts = datetime.datetime.now(datetime.timezone.utc)
+            now_ts = datetime.now(timezone.utc)
             recent = [m for m in messages if getattr(m, "date", None)]
             # Relaxed Activity Check: Just need 1 message in last 7 days (168 hours)
             recent = [m for m in recent if (now_ts - (m.date if m.date.tzinfo else m.date.replace(tzinfo=datetime.timezone.utc))) <= datetime.timedelta(hours=168)]
@@ -3141,7 +3190,7 @@ async def handle_v21_logic(event):
             try:
                 # Use async load/save for New Lead Scoring
                 leads = await load_json_async(LEADS_JSON, [])
-                leads.append({"user_id": user_id, "group_id": group_id, "group_title": group_title, "text": event.raw_text, "ts": datetime.datetime.now().isoformat()})
+                leads.append({"user_id": user_id, "group_id": group_id, "group_title": group_title, "text": event.raw_text, "ts": datetime.now().isoformat()})
                 await save_json_async(LEADS_JSON, leads)
             except Exception:
                 pass
@@ -3161,7 +3210,7 @@ async def handle_v21_logic(event):
                     await _output_status("STATUS: PROCEED")
             except Exception:
                 pass
-            msg_ts = getattr(event.message, "date", datetime.datetime.now()).isoformat()
+            msg_ts = getattr(event.message, "date", datetime.now()).isoformat()
             persona_id = choose_persona_id(group_title)
             try:
                 src = await get_group_source(group_id)
@@ -3258,10 +3307,10 @@ async def handshake_processor():
             async with aiosqlite.connect(DB_FILE) as db:
                 # Limit to 5 leads per sync to avoid rapid flood on restart
                 limit = 5 if os.environ.get("AURA_MODE", "").lower() == "testing" else 10
-                async with db.execute("SELECT user_id, username, message, message_id, group_id, group_title FROM prospects WHERE status = 'not_contacted' AND opt_out = 0 LIMIT ?", (limit,)) as cursor:
+                async with db.execute("SELECT user_id, username, message, message_id, group_id, group_title, message_ts FROM prospects WHERE status = 'not_contacted' AND opt_out = 0 LIMIT ?", (limit,)) as cursor:
                     rows = await cursor.fetchall()
                     logger.info(f"Found {len(rows)} not_contacted prospects in DB (capped at {limit}).")
-                    for u_id, u_name, msg, m_id, g_id, g_title in rows:
+                    for u_id, u_name, msg, m_id, g_id, g_title, m_ts in rows:
                         if u_id not in queued_handshakes:
                             logger.info(f"Syncing prospect {u_id} from DB to outreach queue.")
                             queued_handshakes[u_id] = {
@@ -3270,7 +3319,8 @@ async def handshake_processor():
                                 "due": time.time() + random.randint(30, 120) if os.environ.get("AURA_MODE", "").lower() == "testing" else time.time() + random.randint(300, 600),
                                 "snippet": msg[:120],
                                 "group_title": g_title,
-                                "username": u_name
+                                "username": u_name,
+                                "message_ts": m_ts
                             }
             
             now = time.time()
@@ -3286,6 +3336,7 @@ async def handshake_processor():
                     snippet = data.get("snippet", "")
                     group_title = data.get("group_title", "the group")
                     cached_username = data.get("username")
+                    m_ts = data.get("message_ts")
                     try:
                         # Only react if it's a valid message ID (not 0 or None)
                         if msg_id and (should_outreach() or os.environ.get("AURA_MODE", "").lower() == "testing"):
@@ -3308,7 +3359,7 @@ async def handshake_processor():
                             continue
                         if not market_hour_ok() and os.environ.get("AURA_MODE", "").lower() != "testing":
                             tz = _market_tzinfo()
-                            h = datetime.datetime.now(tz).hour
+                            h = datetime.now(tz).hour
                             logger.info(f"Skipping DM to {u} (Outside human hours: {h}:00 in {tz.key}).")
                             continue
                         stats = await load_json_async(STATS_FILE, apex_supreme_stats)
@@ -3409,9 +3460,8 @@ async def handshake_processor():
                             
                             # AI Optimization: Only use LLM for high-value leads (score >= 8)
                             if ai_client and lead_score >= 8:
-                                # Fix typo: generate_outreach_dm -> generate_ai_dm
-                                # Arguments: lead_name, group_name, user_msg, lead_score, context_hint, style_hint, stealth
-                                dm_text = await generate_ai_dm(u, group_title, snippet or "", lead_score, social_hint, persona_id, lead_premium)
+                                # Aiden V2 Outreach Strategy: Pass username and message timestamp
+                                dm_text = await generate_ai_dm(uname or u, group_title, snippet or "", lead_score, social_hint, persona_id, lead_premium, m_ts)
                             else:
                                 # AI Savings: Use template for mid-low value leads
                                 dm_text = _fallback_dm(u, group_title, snippet or "", lead_score)
@@ -3535,7 +3585,7 @@ def quality_gate(full_user):
         if isinstance(st, types.UserStatusEmpty):
             return False
             
-        now_ts = datetime.datetime.now(datetime.timezone.utc)
+        now_ts = datetime.now(timezone.utc)
         if isinstance(st, (UserStatusOnline, UserStatusRecently)):
             return True
             
@@ -3591,7 +3641,7 @@ async def export_db(event):
     if not event.is_private: return
     try:
         if os.path.exists(DB_FILE):
-            await client.send_file('me', DB_FILE, caption=f"ðŸ›°ï¸ **Gold Leads Database Export**\nTime: {datetime.datetime.now()}")
+            await client.send_file('me', DB_FILE, caption=f"ðŸ›°ï¸ **Gold Leads Database Export**\nTime: {datetime.now()}")
         else:
             await event.reply("Database file not found.")
     except Exception as e:
@@ -3715,7 +3765,7 @@ async def historical_scan_loop():
                                         await _output_status("STATUS: PROCEED")
                                 except Exception:
                                     pass
-                                msg_ts = getattr(m, "date", datetime.datetime.now()).isoformat()
+                                msg_ts = getattr(m, "date", datetime.now()).isoformat()
                                 persona_id = choose_persona_id(title or "group")
                                 try:
                                     src = await get_group_source(group_id)
@@ -3757,7 +3807,7 @@ async def historical_scan_loop():
 async def prune_dead_chats_loop():
     while True:
         try:
-            cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)).isoformat()
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
             async with aiosqlite.connect(DB_FILE, timeout=60) as conn:
                 async with conn.execute("SELECT group_id, title FROM joined_groups WHERE banned = 0 AND archived = 0") as cursor:
                     rows = await cursor.fetchall()
@@ -3948,15 +3998,7 @@ def _detect_contact_protocols(title, desc_texts):
         items.append("form")
     return list(dict.fromkeys(items))
 
-def _buyer_intent_texts(texts):
-    t = ' '.join(texts).lower()
-    if any(k in t for k in SELLER_SHIELD_TERMS):
-        return False
-    hit = 0
-    for k in BUYER_PAIN_KEYWORDS:
-        if k.lower() in t:
-            hit += 1
-    return hit >= 1
+
 
 def _trust_score(members, eng, sources_count, buyer_ok):
     s = 0
@@ -4224,7 +4266,8 @@ async def main():
     # Self-DM Test for health check
     try:
         me = await client.get_me()
-        await client.send_message('me', f"Aura Apex Supreme V2.1 Started. Health Check: OK. Mode: {os.environ.get('AURA_MODE', 'production')}")
+        # Startup notification to 'me' disabled
+        # await client.send_message('me', f"Aura Apex Supreme V2.1 Started. Health Check: OK. Mode: {os.environ.get('AURA_MODE', 'production')}")
         logger.info("Self-DM test successful. Account is active.")
     except Exception as e:
         logger.warning(f"Self-DM test failed: {e}")

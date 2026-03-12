@@ -1,4 +1,4 @@
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any
 import asyncio
 import json
 import logging
@@ -9,13 +9,11 @@ import os
 import random
 import sys
 import time
-import re
 import aiosqlite
 import sqlite3
 import threading
 from config import (
-    DB_FILE, JUNK_KEYWORDS, TIER_1_INDICATORS, URGENCY_KEYWORDS, COMPETITOR_KEYWORDS,
-    REBRAND_KEYWORDS, MARKET_KEYWORDS
+    DB_FILE, JUNK_KEYWORDS, REBRAND_KEYWORDS
 )
 
 # Added for compatibility with aura_apex_supreme imports
@@ -259,7 +257,7 @@ def save_json(path: str, data: Any) -> None:
                     cur = con.cursor()
                     cur.execute("DELETE FROM prospect_catalog")
                     for rec in data:
-                        cur.execute("INSERT OR REPLACE INTO prospect_catalog(url, data) VALUES(?, ?)", (str(rec.get("url","")), json.dumps(rec)))
+                        cur.execute("INSERT OR REPLACE INTO prospect_catalog(url, data) VALUES(?, ?)", (str(rec.get("url", "")), json.dumps(rec)))
                     con.commit()
                     con.close()
                     return
@@ -284,7 +282,7 @@ def save_json(path: str, data: Any) -> None:
                     con = sqlite3.connect(DB_FILE)
                     cur = con.cursor()
                     for it in data:
-                        cur.execute("INSERT INTO join_attempts(id, title, status, reason, ts) VALUES(?,?,?,?,?)", (str(it.get("id","")), str(it.get("title","")), str(it.get("status","")), str(it.get("reason","")), float(it.get("ts",0.0))))
+                        cur.execute("INSERT INTO join_attempts(id, title, status, reason, ts) VALUES(?, ?, ?, ?, ?)", (str(it.get("id", "")), str(it.get("title", "")), str(it.get("status", "")), str(it.get("reason", "")), float(it.get("ts", 0.0))))
                     con.commit()
                     con.close()
                     return
@@ -296,7 +294,7 @@ def save_json(path: str, data: Any) -> None:
                     cur = con.cursor()
                     cur.execute("DELETE FROM potential_targets")
                     for it in data:
-                        cur.execute("INSERT OR REPLACE INTO potential_targets(link, title, members, source_group_id, discovered_at) VALUES(?,?,?,?,?)", (str(it.get("link","")), str(it.get("title","")), int(it.get("members",0) or 0), str(it.get("source_group_id","")), str(it.get("discovered_at",""))))
+                        cur.execute("INSERT OR REPLACE INTO potential_targets(link, title, members, source_group_id, discovered_at) VALUES(?, ?, ?, ?, ?)", (str(it.get("link", "")), str(it.get("title", "")), int(it.get("members", 0) or 0), str(it.get("source_group_id", "")), str(it.get("discovered_at", ""))))
                     con.commit()
                     con.close()
                     return
@@ -307,7 +305,7 @@ def save_json(path: str, data: Any) -> None:
                     con = sqlite3.connect(DB_FILE)
                     cur = con.cursor()
                     for it in data:
-                        cur.execute("INSERT OR REPLACE INTO cached_invites(link, title, ts) VALUES(?,?,?)", (str(it.get("link","")), str(it.get("title","")), float(it.get("ts",0.0))))
+                        cur.execute("INSERT OR REPLACE INTO cached_invites(link, title, ts) VALUES(?, ?, ?)", (str(it.get("link", "")), str(it.get("title", "")), float(it.get("ts", 0.0))))
                     con.commit()
                     con.close()
                     return
@@ -436,7 +434,6 @@ def calculate_lead_score(text: str, user: Any = None) -> int:
             is_bot = getattr(user, "bot", False)
             uname = (getattr(user, "username", "") or "").lower()
             fname = (getattr(user, "first_name", "") or "").lower()
-            lname = (getattr(user, "last_name", "") or "").lower()
             
             if is_bot or any(k in uname for k in ["bot", "keeper"]) or any(k in fname for k in ["bot", "keeper"]):
                 return -100 # Definitely a bot

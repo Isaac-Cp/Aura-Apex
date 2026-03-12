@@ -1,4 +1,4 @@
-from typing import List, Tuple, Dict, Optional, Any, Union, Set
+from typing import List, Tuple, Dict, Optional, Any, Set
 import asyncio
 import os
 import re
@@ -6,24 +6,29 @@ import time
 import json
 import datetime
 import io
+import random
+import logging
 from urllib.parse import urljoin
 
 import aiohttp
 import ssl
 import certifi
-import logging
-from aura_core import setup_logging
-setup_logging()
-logger = logging.getLogger(__name__)
 from bs4 import BeautifulSoup
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, PeerFloodError, ChatWriteForbiddenError, ChannelPrivateError, UserAlreadyParticipantError
 from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
-# Forum topic APIs vary across Telethon versions; dynamic mapping disabled for compatibility
 from groq import AsyncGroq
 from PIL import Image, ImageDraw, ImageFont
 from zoneinfo import ZoneInfo
+
+from aura_core import setup_logging
+from config import (
+    API_ID, API_HASH, SESSION_STRING, GROQ_API_KEY, CURATOR_CHANNEL_ID, JUNK_KEYWORDS,
+    REQUEST_TIMEOUT, CHECK_INTERVAL_SECONDS, BRAND_COLORS, PLATFORM_SPECS, PRO_TIPS
+)
+from config import rules as CONFIG_RULES
+
 try:
     import sentry_sdk
     _SENTRY_DSN = (os.environ.get("SENTRY_DSN") or "").strip()
@@ -32,11 +37,8 @@ try:
 except Exception:
     pass
 
-from config import (
-    API_ID, API_HASH, SESSION_STRING, GROQ_API_KEY, CURATOR_CHANNEL_ID, JUNK_KEYWORDS,
-    REQUEST_TIMEOUT, CHECK_INTERVAL_SECONDS, BRAND_COLORS, PLATFORM_SPECS, PRO_TIPS
-)
-from config import rules as CONFIG_RULES
+setup_logging()
+logger = logging.getLogger(__name__)
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 try:
@@ -70,8 +72,7 @@ try:
 except Exception:
     _SEL_HTML = None
 try:
-    import lxml  # type: ignore
-    BS4_PARSER = "lxml"
+    BS4_PARSER = "html.parser"
 except Exception:
     BS4_PARSER = "html.parser"
 _URL_HTML_CACHE: Dict[str, Tuple[float, str]] = {}
@@ -1101,13 +1102,13 @@ educational_rephrased_today = 0
 last_audit_date = None
 
 def is_sensitive_url(link: str) -> bool:
-    l = (link or "").lower()
-    return ("copyright" in l) or ("infring" in l)
+    link_lower = (link or "").lower()
+    return ("copyright" in link_lower) or ("infring" in link_lower)
 
 async def maybe_send_daily_audit(client: TelegramClient) -> None:
     global last_audit_date, risky_skipped_today, educational_rephrased_today
     try:
-        today = datetime.datetime.now(datetime.timezone.utc).date()
+        today = datetime.now(timezone.utc).date()
         if last_audit_date is None:
             last_audit_date = today
             return
@@ -1120,7 +1121,9 @@ async def maybe_send_daily_audit(client: TelegramClient) -> None:
             try:
                 send_dm = (os.environ.get("CURATOR_AUDIT_DM") or "").strip().lower() in ("1", "true", "yes")
                 if send_dm:
-                    await client.send_message('me', msg)
+                    # Status update to 'me' disabled
+                    # await client.send_message('me', msg)
+                    pass
             except Exception:
                 pass
             risky_skipped_today = 0
@@ -1825,7 +1828,9 @@ async def post_to_channel(client: TelegramClient, channel_id: int, source: str, 
                     logger.error(f"Failed to send msg after retry: {e2}")
                     return False
         try:
-            await client.send_message('me', f"[Curator] Posted: {link}")
+            # Post notification to 'me' disabled
+            # await client.send_message('me', f"[Curator] Posted: {link}")
+            pass
         except Exception:
             pass
         await _save_dedup(title, link)
@@ -1842,7 +1847,7 @@ async def post_to_channel(client: TelegramClient, channel_id: int, source: str, 
 async def count_today_posts(client: TelegramClient, channel_id: int) -> int:
     try:
         msgs = await client.get_messages(channel_id, limit=100)
-        today = datetime.datetime.now(datetime.timezone.utc).date()
+        today = datetime.now(timezone.utc).date()
         c = 0
         for m in msgs:
             dt = getattr(m, "date", None)
@@ -1909,7 +1914,9 @@ async def maybe_post_soft_sale(client: TelegramClient, channel_id: int, today_co
             await client.send_message(channel_id, text)
             await _save_dedup(header, "")
             try:
-                await client.send_message('me', f"[Curator] Soft Sale Posted")
+                # Sale notification to 'me' disabled
+                # await client.send_message('me', f"[Curator] Soft Sale Posted")
+                pass
             except Exception:
                 pass
             return True
@@ -2009,7 +2016,7 @@ async def curator_loop():
                 
                 # Determine current market window
                 tz = _curator_tzinfo()
-                now = datetime.datetime.now(tz)
+                now = datetime.now(tz)
                 target_topic = get_target_topic_for_time(now)
                 in_window = is_within_market_window(now)
                 
@@ -2111,7 +2118,8 @@ async def curator_loop():
                             if _SOURCE_METRICS:
                                 details = "; ".join([f"{n}: {m.get('success',0)}/{m.get('attempts',0)}" for n, m in _SOURCE_METRICS.items()])
                                 summary = f"{summary}\n\n{details}"
-                            await client.send_message('me', f"[Curator] {summary}")
+                            # Summary to 'me' disabled
+                            # await client.send_message('me', f"[Curator] {summary}")
                     except Exception as e:
                         logger.error(f"Heartbeat report error: {e}")
                     last_hb = time.time()

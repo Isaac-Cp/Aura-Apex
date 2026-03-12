@@ -1,0 +1,1554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aura Core | Dashboard</title>
+    <link rel="icon" type="image/jpg" src="/logo.jpg">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        midnight: '#0C1423',
+                        deep: '#162030',
+                        auraGold: '#21abe2',
+                        auraApexBlue: '#21abe2',
+                        auraApexMagenta: '#EC4899',
+                        auraApexOrange: '#F59E0B',
+                        success: '#00E676',
+                        danger: '#FF5252'
+                    },
+                    fontFamily: {
+                        mono: ['JetBrains Mono', 'monospace'],
+                        sans: ['Inter', 'sans-serif']
+                    },
+                    backgroundImage: {
+                        'apex-gradient': 'linear-gradient(135deg, #21abe2 0%, #EC4899 50%, #F59E0B 100%)',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { background-color: #0C1423; font-family: 'Inter', sans-serif; color: #E2E8F0; }
+        .glass { background: rgba(22, 32, 48, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(33, 171, 226, 0.1); }
+        .gold-glow { box-shadow: 0 0 15px rgba(33, 171, 226, 0.15); }
+        .apex-glow { box-shadow: 0 0 20px rgba(33, 171, 226, 0.2); }
+        .status-dot { height: 8px; width: 8px; border-radius: 50%; display: inline-block; }
+        
+        /* Tab Logic */
+        .tab-content { display: none; }
+        .tab-content.active { display: block; animation: fadeIn 0.4s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .tab-btn.active { 
+            background: linear-gradient(135deg, rgba(33, 171, 226, 0.1) 0%, rgba(236, 72, 153, 0.1) 100%);
+            border-color: rgba(33, 171, 226, 0.4);
+            color: white;
+        }
+        .tab-btn.active span { background: linear-gradient(135deg, #21abe2 0%, #EC4899 50%, #F59E0B 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        
+        /* Apex Gradient Text */
+        .text-apex {
+            background: linear-gradient(135deg, #21abe2 0%, #EC4899 50%, #F59E0B 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .gold-glow { box-shadow: 0 0 15px rgba(33, 171, 226, 0.15); }
+        .apex-glow { box-shadow: 0 0 20px rgba(33, 171, 226, 0.2); }
+
+        @keyframes scan {
+            0% { transform: translateY(-100%); }
+            100% { transform: translateY(200%); }
+        }
+        .animate-scan { animation: scan 2s linear infinite; }
+
+        /* Mobile Adjustments */
+        @media (max-width: 768px) {
+            .glass { padding: 1rem !important; }
+            h3 { font-size: 1.875rem !important; } /* text-3xl */
+        }
+
+        #logAutoScroll:checked + div { background: rgba(0, 230, 118, 0.2); border-color: rgba(0, 230, 118, 0.3); }
+        #logAutoScroll:checked + div .dot { transform: translateX(12px); background: #00E676; }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: rgba(12, 20, 35, 0.5); }
+        ::-webkit-scrollbar-thumb { background: rgba(33, 171, 226, 0.2); border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(33, 171, 226, 0.5); }
+
+        /* Scrollable Container */
+        .scroll-container { 
+            max-height: 450px; 
+            overflow-y: auto; 
+            scrollbar-gutter: stable;
+        }
+        .scroll-container-sm { 
+            max-height: 300px; 
+            overflow-y: auto; 
+            scrollbar-gutter: stable;
+        }
+
+        /* Glassmorphism Upgrade */
+        .glass { 
+            background: rgba(22, 32, 48, 0.6); 
+            backdrop-filter: blur(12px); 
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        }
+        .glass:hover {
+            border: 1px solid rgba(33, 171, 226, 0.2);
+            background: rgba(22, 32, 48, 0.7);
+        }
+
+        /* Sticky Table Header */
+        .sticky-header th {
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            background: rgba(22, 32, 48, 0.95);
+            backdrop-filter: blur(8px);
+        }
+
+        /* Animation for logo glow */
+        @keyframes pulse-glow {
+            0% { box-shadow: 0 0 15px rgba(56, 189, 248, 0.2); }
+            50% { box-shadow: 0 0 30px rgba(236, 72, 153, 0.4); }
+            100% { box-shadow: 0 0 15px rgba(56, 189, 248, 0.2); }
+        }
+        .logo-pulse { animation: pulse-glow 4s ease-in-out infinite; }
+    </style>
+</head>
+<body class="min-h-screen p-4 md:p-8">
+    <!-- Header -->
+    <header class="max-w-7xl mx-auto flex flex-col lg:flex-row justify-between items-center mb-10 gap-6">
+        <div class="flex items-center gap-5">
+            <!-- Official Aura Apex Logo -->
+            <div class="relative w-20 h-20 rounded-2xl p-[2px] bg-apex-gradient logo-pulse group transition-transform hover:scale-105 overflow-hidden">
+                <img src="/logo.jpg" alt="Aura Apex" class="w-full h-full object-cover rounded-2xl">
+                <!-- High-tech scanning overlay -->
+                <div class="absolute inset-0 bg-gradient-to-b from-transparent via-auraApexBlue/20 to-transparent h-1/2 w-full animate-scan opacity-0 group-hover:opacity-100"></div>
+            </div>
+            <div>
+                <h1 class="text-3xl font-black tracking-tighter text-white font-mono uppercase italic">AURA <span class="text-apex">APEX</span></h1>
+                <div class="flex items-center gap-3 mt-1">
+                    <div class="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-success/10 border border-success/20">
+                        <span class="status-dot bg-success animate-pulse"></span>
+                        <span class="text-[10px] font-bold text-success uppercase tracking-widest">Ghost Active</span>
+                    </div>
+                    <span class="text-slate-500 text-[10px] font-mono uppercase tracking-widest border-l border-white/10 pl-3">Fortress V2.1</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="flex flex-wrap justify-center gap-3 w-full lg:w-auto">
+            <div class="flex items-center gap-3 glass px-4 py-2 rounded-xl border border-white/5">
+                <span class="text-[9px] font-bold text-slate-500 uppercase tracking-[0.2em]">Live Sync</span>
+                <button onclick="toggleRefresh()" id="refreshToggle" class="w-10 h-5 bg-success/20 rounded-full relative transition-all border border-success/30">
+                    <div id="refreshDot" class="w-3.5 h-3.5 bg-success rounded-full absolute top-0.5 left-0.5 transition-all shadow-[0_0_8px_rgba(0,230,118,0.5)]"></div>
+                </button>
+            </div>
+            
+            <button onclick="openLogViewer()" class="glass px-5 py-2.5 rounded-xl text-xs flex items-center gap-2 font-bold uppercase tracking-widest text-auraGold hover:bg-white/5 transition-all group">
+                <svg class="w-4 h-4 transition-transform group-hover:rotate-12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                Tech Logs
+            </button>
+            
+            <div class="glass px-5 py-2.5 rounded-xl text-xs flex items-center gap-2 font-bold uppercase tracking-widest text-slate-300 border-white/5">
+                <span class="text-auraGold">UP:</span> {{ uptime or '0m' }}
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto space-y-8">
+        <!-- Navigation Tabs -->
+        <nav class="flex flex-wrap gap-2 lg:gap-4 mb-8">
+            <button onclick="switchTab('overview')" id="tab-btn-overview" class="tab-btn active glass px-6 py-3 rounded-xl border border-white/5 flex items-center gap-3 transition-all">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"/></svg>
+                <span class="text-xs font-bold uppercase tracking-widest text-slate-400">Overview</span>
+            </button>
+            <button onclick="switchTab('outreach')" id="tab-btn-outreach" class="tab-btn glass px-6 py-3 rounded-xl border border-white/5 flex items-center gap-3 transition-all">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
+                <span class="text-xs font-bold uppercase tracking-widest text-slate-400">Outreach</span>
+            </button>
+            <button onclick="switchTab('intel')" id="tab-btn-intel" class="tab-btn glass px-6 py-3 rounded-xl border border-white/5 flex items-center gap-3 transition-all">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                <span class="text-xs font-bold uppercase tracking-widest text-slate-400">Intelligence</span>
+            </button>
+            <button onclick="switchTab('settings')" id="tab-btn-settings" class="tab-btn glass px-6 py-3 rounded-xl border border-white/5 flex items-center gap-3 transition-all">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                <span class="text-xs font-bold uppercase tracking-widest text-slate-400">Settings</span>
+            </button>
+        </nav>
+
+        <!-- Tab Content: Overview -->
+        <section id="tab-overview" class="tab-content active space-y-8">
+            <!-- Stats Grid -->
+            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 md:gap-6">
+                <div class="glass p-5 rounded-2xl border-white/5 transition-all hover:border-auraApexBlue/30 logo-pulse group">
+                    <p class="text-slate-500 text-[10px] font-bold uppercase tracking-[0.2em] mb-3 group-hover:text-auraApexBlue transition-colors">Total Prospects</p>
+                    <h3 class="text-3xl font-black text-white font-mono tracking-tighter">{{ stats.total_prospects or 0 }}</h3>
+                    <div class="mt-4 h-1 w-8 bg-auraApexBlue rounded-full opacity-30"></div>
+                </div>
+                <div class="glass p-5 rounded-2xl border-white/5 transition-all hover:border-auraApexMagenta/30 logo-pulse group">
+                    <p class="text-slate-500 text-[10px] font-bold uppercase tracking-[0.2em] mb-3 group-hover:text-auraApexMagenta transition-colors">Capture Velocity</p>
+                    <h3 class="text-3xl font-black text-white font-mono tracking-tighter">{{ lead_velocity or 0.0 }}<span class="text-xs text-slate-500">/hr</span></h3>
+                    <div class="mt-4 h-1 w-8 bg-auraApexMagenta rounded-full opacity-30"></div>
+                </div>
+                <div class="glass p-5 rounded-2xl border-white/5 transition-all hover:border-success/30 logo-pulse group">
+                    <p class="text-slate-500 text-[10px] font-bold uppercase tracking-[0.2em] mb-3 group-hover:text-success transition-colors">DMs Sent</p>
+                    <h3 class="text-3xl font-black text-white font-mono tracking-tighter">{{ stats.contacted or 0 }}</h3>
+                    <div class="mt-4 h-1 w-8 bg-success rounded-full opacity-30"></div>
+                </div>
+                <div class="glass p-5 rounded-2xl border-white/5 transition-all hover:border-auraApexOrange/30 logo-pulse group">
+                    <p class="text-slate-500 text-[10px] font-bold uppercase tracking-[0.2em] mb-3 group-hover:text-auraApexOrange transition-colors">Joined Groups</p>
+                    <h3 class="text-3xl font-black text-white font-mono tracking-tighter">{{ stats.joined_groups or 0 }}</h3>
+                    <div class="mt-4 h-1 w-8 bg-auraApexOrange rounded-full opacity-30"></div>
+                </div>
+                <div class="glass p-5 rounded-2xl border-white/5 transition-all hover:border-auraGold/30 logo-pulse group col-span-2 md:col-span-1 flex flex-col justify-center items-center text-center">
+                    <p class="text-slate-500 text-[10px] font-bold uppercase tracking-[0.2em] mb-3 group-hover:text-auraGold transition-colors">Conversion Rate</p>
+                    <h3 class="text-3xl font-black text-white font-mono tracking-tighter">{{ stats.conversion_rate or '0%' }}</h3>
+                    <div class="mt-4 h-1 w-12 bg-auraGold rounded-full opacity-30 group-hover:w-20 transition-all duration-500"></div>
+                </div>
+            </div>
+
+            <!-- Charts Section -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div class="lg:col-span-2 glass rounded-2xl p-6">
+                    <h2 class="text-lg font-bold text-white mb-6 flex items-center gap-2 font-mono uppercase tracking-tight">
+                        <svg class="w-5 h-5 text-auraGold" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z"/></svg>
+                        Activity Trends (Last 7 Days)
+                    </h2>
+                    <div id="activityChart" class="w-full h-64"></div>
+                </div>
+                
+                <div class="glass rounded-2xl p-6 flex flex-col justify-between">
+                    <div>
+                        <h2 class="text-lg font-bold text-white mb-4 flex items-center gap-2 font-mono uppercase tracking-tight">
+                            <svg class="w-5 h-5 text-auraGold" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                            System Health
+                        </h2>
+                        <div class="space-y-4">
+                            <div class="flex justify-between items-center p-3 bg-white/5 rounded-xl border border-white/5">
+                                <span class="text-sm text-slate-300 font-mono">Curator Engine</span>
+                                <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-success/20 text-success border border-success/30 uppercase">Operational</span>
+                            </div>
+                            <div class="flex justify-between items-center p-3 bg-white/5 rounded-xl border border-white/5">
+                                <span class="text-sm text-slate-300 font-mono">Apex Outreach</span>
+                                <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-success/20 text-success border border-success/30 uppercase">Operational</span>
+                            </div>
+                            <div class="flex justify-between items-center p-3 bg-white/5 rounded-xl border border-white/5">
+                                <span class="text-sm text-slate-300 font-mono">AI Processing</span>
+                                <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-success/20 text-success border border-success/30 uppercase">Active</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mt-6 pt-6 border-t border-white/5">
+                        <p class="text-xs text-slate-500 font-mono mb-2 uppercase tracking-widest">AI Credit Usage (Est.)</p>
+                        <div class="w-full bg-deep rounded-full h-2 overflow-hidden mb-2">
+                            <div class="bg-success h-2 rounded-full shadow-[0_0_8px_rgba(0,230,118,0.4)]" style="width: 12%"></div>
+                        </div>
+                        <div class="flex justify-between text-[10px] font-mono text-slate-400 uppercase">
+                            <span>Used: ~{{ stats.contacted * 2 }} units</span>
+                            <span>Daily Limit: 5000</span>
+                        </div>
+                    </div>
+                    <div class="mt-6 pt-6 border-t border-white/5">
+                        <h2 class="text-[10px] font-bold text-slate-500 flex items-center gap-2 font-mono uppercase tracking-[0.2em] mb-4">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            Outreach Queue
+                        </h2>
+                        <div class="space-y-3">
+                            {% for item in outreach_queue %}
+                            <div class="flex justify-between items-center text-[10px] font-mono group">
+                                <span class="text-slate-400 group-hover:text-auraGold transition-colors truncate max-w-[100px]">@{{ item.username }}</span>
+                                <span class="text-slate-600 text-[8px] italic">Queued</span>
+                            </div>
+                            {% endfor %}
+                            {% if not outreach_queue %}
+                            <p class="text-[10px] text-slate-600 italic font-mono text-center">Queue empty.</p>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="mt-6 pt-6 border-t border-white/5 grid grid-cols-2 gap-3">
+                        <button onclick="systemAction('restart')" class="bg-white/5 hover:bg-white/10 border border-white/10 text-white py-2 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all">Restart System</button>
+                        <button onclick="systemAction('clear_cache')" class="bg-white/5 hover:bg-white/10 border border-white/10 text-white py-2 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all">Flush Cache</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Persona & Niche Grid -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div class="lg:col-span-2 glass rounded-2xl p-6">
+                    <h2 class="text-lg font-bold text-white mb-6 flex items-center gap-2 font-mono uppercase tracking-tight">
+                        <svg class="w-5 h-5 text-auraApexBlue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
+                        Persona Performance
+                    </h2>
+                    <div id="personaChart" class="w-full h-64"></div>
+                </div>
+                <div class="glass rounded-2xl p-6">
+                    <h2 class="text-lg font-bold text-white mb-6 flex items-center gap-2 font-mono uppercase tracking-tight">
+                        <svg class="w-5 h-5 text-auraApexMagenta" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"/></svg>
+                        Niche Segmentation
+                    </h2>
+                    <div id="nicheChart" class="w-full h-64"></div>
+                </div>
+            </div>
+
+            <!-- Activity Heatmap -->
+            <div class="glass rounded-2xl p-6">
+                <h2 class="text-lg font-bold text-white mb-6 flex items-center gap-2 font-mono uppercase tracking-tight">
+                    <svg class="w-5 h-5 text-auraApexOrange" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    Apex Activity Density (24h)
+                </h2>
+                <div id="heatmapChart" class="w-full h-40"></div>
+            </div>
+        </section>
+
+        <!-- Tab Content: Outreach -->
+        <section id="tab-outreach" class="tab-content space-y-8">
+            <!-- Search & Export -->
+            <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
+                <div class="lg:col-span-3 glass p-3 rounded-2xl flex flex-col md:flex-row items-center gap-3">
+                    <div class="flex-1 relative w-full">
+                        <svg class="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                        <input type="text" id="prospectSearch" placeholder="Search by username, group, or intent..." class="w-full bg-midnight/50 border border-white/5 rounded-xl py-3.5 pl-12 pr-4 text-white focus:outline-none focus:border-auraApexBlue/50 transition-all font-mono text-sm">
+                    </div>
+                    <button onclick="performSearch()" class="w-full md:w-auto bg-apex-gradient text-white px-8 py-3.5 rounded-xl font-black uppercase tracking-widest text-xs hover:opacity-90 transition-opacity active:scale-95 shadow-lg">Search Apex</button>
+                </div>
+                <div class="glass p-3 rounded-2xl flex items-center justify-center">
+                    <a href="/api/export/prospects" class="w-full flex items-center justify-center gap-3 text-auraGold hover:text-white transition-all font-mono font-black uppercase tracking-[0.2em] text-[10px]">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                        Export Leads
+                    </a>
+                </div>
+            </div>
+
+            <!-- Prospects & Logs -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <!-- Recent Prospects Table -->
+                <div class="lg:col-span-2 glass rounded-2xl overflow-hidden flex flex-col relative">
+                    <div id="bulkActionBar" class="absolute top-0 inset-x-0 bg-auraGold/90 backdrop-blur-md h-14 z-10 flex items-center justify-between px-6 transform -translate-y-full transition-transform duration-300">
+                        <span class="text-midnight font-black text-xs uppercase tracking-widest"><span id="selectedCount">0</span> Leads Selected</span>
+                        <div class="flex gap-2">
+                            <button onclick="bulkAction('contacted')" class="bg-midnight text-white px-4 py-1.5 rounded-lg text-[10px] font-bold uppercase hover:bg-black transition-colors">Mark DMed</button>
+                            <button onclick="bulkAction('delete')" class="bg-danger text-white px-4 py-1.5 rounded-lg text-[10px] font-bold uppercase hover:bg-red-700 transition-colors">Delete</button>
+                            <button onclick="clearSelection()" class="text-midnight font-bold text-[10px] uppercase hover:underline ml-2">Cancel</button>
+                        </div>
+                    </div>
+                    <div class="px-6 py-4 border-b border-white/5 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                        <h2 class="text-lg font-bold text-white flex items-center gap-2 font-mono uppercase tracking-tight">
+                            <svg class="w-5 h-5 text-auraGold" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
+                            Recent Prospects
+                        </h2>
+                        <div class="flex bg-midnight/50 p-1 rounded-xl border border-white/5 gap-1">
+                            <select onchange="filterByNiche(this.value)" id="nicheFilter" class="bg-transparent text-[10px] font-bold uppercase tracking-widest px-2 py-1 text-slate-500 hover:text-white outline-none border-none">
+                                <option value="all">All Niches</option>
+                                <option value="Sports">Sports</option>
+                                <option value="Cinema">Cinema</option>
+                                <option value="Regional">Regional</option>
+                                <option value="Trial">Trial</option>
+                                <option value="General">General</option>
+                            </select>
+                            <div class="w-[1px] h-4 bg-white/10 my-auto mx-1"></div>
+                            <button onclick="filterProspects('all')" id="filter-all" class="px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all bg-auraGold text-midnight">All</button>
+                            <button onclick="filterProspects('not_contacted')" id="filter-not_contacted" class="px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all text-slate-500 hover:text-white">New</button>
+                            <button onclick="filterProspects('contacted')" id="filter-contacted" class="px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all text-slate-500 hover:text-white">DMed</button>
+                        </div>
+                    </div>
+                    <div class="overflow-x-auto flex-1 scroll-container">
+                        <table class="w-full text-left text-sm" id="prospectsTable">
+                            <thead class="sticky-header">
+                                <tr class="text-slate-400 font-mono text-xs shadow-sm">
+                                    <th class="px-6 py-3 w-10">
+                                        <input type="checkbox" id="selectAllProspects" onchange="toggleSelectAll(this)" class="w-4 h-4 rounded border-white/10 bg-midnight text-auraGold focus:ring-auraGold focus:ring-offset-midnight">
+                                    </th>
+                                    <th class="px-6 py-3 uppercase tracking-wider">Username</th>
+                                    <th class="px-6 py-3 uppercase tracking-wider">Source Group</th>
+                                    <th class="px-6 py-3 uppercase tracking-wider">Status</th>
+                                    <th class="px-6 py-3 uppercase tracking-wider">Niche</th>
+                                    <th class="px-6 py-3 uppercase tracking-wider">Intent</th>
+                                    <th class="px-6 py-3 uppercase tracking-wider">Discovered</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-white/5">
+                                {% for prospect in recent_prospects %}
+                                <tr class="hover:bg-white/5 transition-colors group" data-status="{{ prospect.status }}" data-niche="{{ prospect.niche }}">
+                                    <td class="px-6 py-4">
+                                        <input type="checkbox" name="prospectSelect" value="{{ prospect.username }}" onchange="updateBulkSelection()" class="prospect-checkbox w-4 h-4 rounded border-white/10 bg-midnight text-auraGold focus:ring-auraGold focus:ring-offset-midnight">
+                                    </td>
+                                    <td class="px-6 py-4 font-mono text-auraApexBlue">
+                                        <div class="flex items-center gap-2 group/user">
+                                            <span class="truncate max-w-[120px]">@{{ prospect.username }}</span>
+                                            <button onclick="copyToClipboard('@{{ prospect.username }}')" class="opacity-0 group-hover/user:opacity-100 transition-opacity p-1 hover:bg-white/10 rounded">
+                                                <svg class="w-3 h-3 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                                            </button>
+                                        </div>
+                                    </td>
+                                    <td class="px-6 py-4 text-slate-300">{{ prospect.group }}</td>
+                                    <td class="px-6 py-4">
+                                        <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest
+                                            {% if prospect.status == 'contacted' %} bg-success/20 text-success border border-success/30
+                                            {% elif prospect.status == 'not_contacted' %} bg-auraApexOrange/20 text-auraApexOrange border border-auraApexOrange/30
+                                            {% else %} bg-slate-700/50 text-slate-400 border border-slate-600/30 {% endif %}">
+                                            {{ prospect.status }}
+                                        </span>
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest bg-white/5 text-slate-400 border border-white/10">
+                                            {{ prospect.niche }}
+                                        </span>
+                                    </td>
+                                    <td class="px-6 py-4">
+                                        <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest
+                                            {% if prospect.sentiment == 'High Intent' %} bg-success/10 text-success border border-success/20
+                                            {% elif prospect.sentiment == 'Buyer Signal' %} bg-auraApexMagenta/10 text-auraApexMagenta border border-auraApexMagenta/20
+                                            {% else %} bg-slate-700/20 text-slate-500 border border-slate-600/20 {% endif %}">
+                                            {{ prospect.sentiment }}
+                                        </span>
+                                    </td>
+                                    <td class="px-6 py-4 text-slate-500 text-xs font-mono">{{ prospect.time }}</td>
+                                </tr>
+                                {% endfor %}
+                                {% if not recent_prospects %}
+                                <tr>
+                                    <td colspan="7" class="px-6 py-8 text-center text-slate-500 italic">No prospects found in database yet.</td>
+                                </tr>
+                                {% endif %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Recent Activity Table (Simplified) -->
+                <div class="glass rounded-2xl overflow-hidden flex flex-col">
+                    <div class="px-6 py-4 border-b border-white/5 flex justify-between items-center">
+                        <h2 class="text-lg font-bold text-white flex items-center gap-2 font-mono uppercase tracking-tight">
+                            <svg class="w-5 h-5 text-auraGold" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                            Log Stream
+                        </h2>
+                        <button onclick="systemAction('clear_db_logs')" class="text-[9px] font-bold text-slate-500 hover:text-danger uppercase tracking-widest transition-colors">Clear</button>
+                    </div>
+                    <div class="overflow-x-auto flex-1 scroll-container">
+                        <table class="w-full text-left text-xs">
+                            <thead class="sticky-header">
+                                <tr class="text-slate-500 font-mono text-[9px] uppercase tracking-widest border-b border-white/5">
+                                    <th class="px-4 py-2">Transaction Details</th>
+                                </tr>
+                            </thead>
+                            <tbody id="logStreamBody" class="divide-y divide-white/5">
+                                {% for log in recent_logs %}
+                                <tr class="hover:bg-white/5 transition-colors">
+                                    <td class="px-4 py-3">
+                                        <div class="flex justify-between mb-1">
+                                            <span class="font-mono text-auraGold text-[10px]">{{ log.id }}</span>
+                                            <span class="text-slate-500 text-[9px] font-mono">{{ log.time }}</span>
+                                        </div>
+                                        <div class="flex items-center gap-2">
+                                            <span class="px-1.5 py-0.5 rounded-[4px] text-[8px] font-bold uppercase
+                                                {% if log.status == 'PROCEED' %} bg-success/20 text-success border border-success/30
+                                                {% elif log.status == 'REJECT' %} bg-danger/20 text-danger border border-danger/30
+                                                {% else %} bg-slate-700/50 text-slate-400 border border-slate-600/30 {% endif %}">
+                                                {{ log.status }}
+                                            </span>
+                                            <span class="text-slate-400 truncate max-w-[120px]">{{ log.title }}</span>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Tab Content: Intelligence -->
+        <section id="tab-intel" class="tab-content space-y-8">
+            <!-- Niche Intel & Blacklist -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <!-- Niche Intel Management -->
+                <div class="lg:col-span-2 glass rounded-2xl p-6 flex flex-col">
+                    <div class="flex justify-between items-center mb-6">
+                        <h2 class="text-lg font-bold text-white flex items-center gap-2 font-mono uppercase tracking-tight">
+                            <svg class="w-5 h-5 text-auraGold" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                            Niche Intelligence
+                        </h2>
+                        <select id="intelCategory" class="bg-midnight/50 border border-white/10 rounded-lg text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 text-auraGold focus:border-auraGold outline-none">
+                            <option value="JUNK_KEYWORDS">Junk Keywords</option>
+                            <option value="TIER_1_INDICATORS">Tier 1 Indicators</option>
+                            <option value="TIER_3_CODES">Tier 3 Codes</option>
+                            <option value="BANNED_ZONES">Banned Zones</option>
+                        </select>
+                    </div>
+                    
+                    <div class="flex gap-2 mb-6">
+                        <input type="text" id="newRuleValue" placeholder="Add new keyword or rule..." class="flex-1 bg-midnight/50 border border-white/10 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-auraGold/50 font-mono">
+                        <button onclick="addIntelRule()" class="bg-auraGold text-midnight px-6 py-2 rounded-xl font-bold text-[10px] uppercase tracking-widest hover:bg-white transition-all">Add Rule</button>
+                    </div>
+
+                    <div id="intelTags" class="flex flex-wrap gap-2 scroll-container-sm p-4 bg-black/20 rounded-2xl border border-white/5">
+                        <!-- Dynamic tags here -->
+                    </div>
+                </div>
+
+                <!-- Blacklist Manager -->
+                <div class="glass rounded-2xl p-6 flex flex-col">
+                    <h2 class="text-lg font-bold text-white mb-6 flex items-center gap-2 font-mono uppercase tracking-tight">
+                        <svg class="w-5 h-5 text-danger" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728L5.636 5.636"/></svg>
+                        Aura Blacklist
+                    </h2>
+                    <div id="blacklistList" class="space-y-3 scroll-container-sm flex-1 pr-2">
+                        <!-- Dynamic blacklist items -->
+                    </div>
+                    <div class="mt-4 pt-4 border-t border-white/5 text-center">
+                        <p class="text-[9px] text-slate-500 font-mono uppercase tracking-widest">Bot automatically skips these IDs</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Scouter Radar -->
+            <div class="glass rounded-2xl overflow-hidden flex flex-col">
+                <div class="px-6 py-4 border-b border-white/5 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                    <h2 class="text-lg font-bold text-white flex items-center gap-2 font-mono uppercase tracking-tight">
+                        <svg class="w-5 h-5 text-auraApexBlue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                        Apex Scouter Radar
+                    </h2>
+                    <!-- Pulse Radar Indicator -->
+                    <div class="flex items-center gap-2 px-3 py-1 rounded-full bg-auraApexBlue/10 border border-auraApexBlue/20">
+                        <span class="w-2 h-2 rounded-full bg-auraApexBlue animate-ping"></span>
+                        <span class="text-[9px] font-bold text-auraApexBlue uppercase tracking-widest">Scanning Global Nodes</span>
+                    </div>
+                </div>
+                <div class="overflow-x-auto flex-1 scroll-container-sm">
+                    <table class="w-full text-left text-sm">
+                        <thead class="sticky-header">
+                            <tr class="text-slate-500 font-mono text-[10px] uppercase tracking-widest border-b border-white/5 shadow-sm">
+                                <th class="px-6 py-4">Node / Group</th>
+                                <th class="px-6 py-4">Link</th>
+                                <th class="px-6 py-4">Population</th>
+                                <th class="px-6 py-4">Detected</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-white/5">
+                            {% for target in potential_targets %}
+                            <tr class="hover:bg-white/5 transition-all group">
+                                <td class="px-6 py-4 text-slate-300 font-bold group-hover:text-white">{{ target.title }}</td>
+                                <td class="px-6 py-4 font-mono text-auraApexBlue">
+                                    <a href="{{ target.link }}" target="_blank" class="hover:underline flex items-center gap-1">
+                                        t.me/...
+                                        <svg class="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+                                    </a>
+                                </td>
+                                <td class="px-6 py-4 text-slate-400 font-mono">{{ target.members }}</td>
+                                <td class="px-6 py-4 text-slate-500 text-[10px] font-mono">{{ target.time }}</td>
+                            </tr>
+                            {% endfor %}
+                            {% if not potential_targets %}
+                            <tr>
+                                <td colspan="4" class="px-6 py-12 text-center text-slate-600 italic font-mono text-xs uppercase tracking-widest">Radar clear. No new nodes detected.</td>
+                            </tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- Tab Content: Settings -->
+        <section id="tab-settings" class="tab-content space-y-8">
+            <!-- Global Settings Manager -->
+            <div class="glass rounded-2xl p-8 border-auraGold/10">
+                <div class="flex justify-between items-center mb-8">
+                    <h2 class="text-xl font-bold text-white font-mono flex items-center gap-3">
+                        <svg class="w-6 h-6 text-auraGold" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                        AURA <span class="text-auraGold">GLOBAL CONFIG</span>
+                    </h2>
+                    <button onclick="saveGlobalSettings()" class="bg-auraGold text-midnight px-8 py-2 rounded-xl font-bold uppercase tracking-widest text-xs hover:bg-white transition-all shadow-lg">Save Settings</button>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
+                    <div class="space-y-2">
+                        <label class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Handshake Delay (s)</label>
+                        <input type="number" id="setting-handshake_delay" class="w-full bg-midnight/50 border border-white/10 rounded-xl px-4 py-3 text-white font-mono focus:border-auraGold outline-none">
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Daily DM Limit</label>
+                        <input type="number" id="setting-daily_dm_limit" class="w-full bg-midnight/50 border border-white/10 rounded-xl px-4 py-3 text-white font-mono focus:border-auraGold outline-none">
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Scouter Interval (s)</label>
+                        <input type="number" id="setting-scouter_interval" class="w-full bg-midnight/50 border border-white/10 rounded-xl px-4 py-3 text-white font-mono focus:border-auraGold outline-none">
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">UI Refresh (s)</label>
+                        <input type="number" id="setting-ui_refresh" class="w-full bg-midnight/50 border border-white/10 rounded-xl px-4 py-3 text-white font-mono focus:border-auraGold outline-none">
+                    </div>
+                    <div class="space-y-2 flex flex-col justify-center">
+                        <label class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Ghost Mode Spoofing</label>
+                        <button onclick="toggleGhostMode()" id="ghostToggleBtn" class="flex items-center gap-3 glass px-4 py-2.5 rounded-xl border border-success/30 text-success font-bold text-xs transition-all">
+                            <div class="w-3 h-3 rounded-full bg-success animate-pulse shadow-[0_0_8px_rgba(0,230,118,0.5)]"></div>
+                            GHOST ACTIVE
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Performance & Sources -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <!-- Source Performance -->
+                <div class="glass rounded-2xl p-6 space-y-6">
+                    <div class="flex justify-between items-center">
+                        <h2 class="text-lg font-bold text-white flex items-center gap-2 font-mono uppercase tracking-tight">
+                            <svg class="w-5 h-5 text-auraGold" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                            Performance
+                        </h2>
+                        <div class="flex gap-2">
+                            <button onclick="switchPerfTab('sources')" id="sourcesTabBtn" class="text-[10px] font-bold uppercase tracking-widest text-auraGold border-b-2 border-auraGold pb-1">Sources</button>
+                            <button onclick="switchPerfTab('keywords')" id="keywordsTabBtn" class="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-white transition-colors pb-1">Keywords</button>
+                        </div>
+                    </div>
+
+                    <div id="sourcesList" class="space-y-4 scroll-container-sm pr-2">
+                        {% for term, kpi in source_kpis.items() %}
+                        <div class="bg-midnight p-3 rounded-xl border border-white/5">
+                            <div class="flex justify-between items-center mb-2">
+                                <span class="text-sm font-mono text-auraGold">{{ term }}</span>
+                                <span class="text-xs text-slate-500 font-mono">{{ kpi.success_rate }}% SR</span>
+                            </div>
+                            <div class="w-full bg-deep rounded-full h-1.5 mb-2 overflow-hidden">
+                                <div class="h-1.5 rounded-full transition-all duration-1000 ease-out
+                                    {% if kpi.success_rate >= 75 %} bg-success shadow-[0_0_8px_rgba(0,230,118,0.4)]
+                                    {% elif kpi.success_rate >= 40 %} bg-auraGold shadow-[0_0_8px_rgba(255,215,0,0.4)]
+                                    {% else %} bg-danger shadow-[0_0_8px_rgba(255,82,82,0.4)] {% endif %}"
+                                    data-width="{{ kpi.success_rate or 0 }}%"></div>
+                            </div>
+                            <div class="flex justify-between text-[10px] font-mono text-slate-400">
+                                <span>Attempts: {{ kpi.attempts }}</span>
+                                <span>Success: {{ kpi.successes }}</span>
+                            </div>
+                        </div>
+                        {% endfor %}
+                        {% if not source_kpis %}
+                        <p class="text-slate-500 italic text-sm text-center">No source data available yet.</p>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div class="lg:col-span-2 glass rounded-2xl p-6 flex flex-col">
+                    <h2 class="text-[10px] font-bold text-slate-500 flex items-center gap-2 font-mono uppercase tracking-[0.2em] mb-4">
+                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 12.414m0 0L9.172 8.172m4.242 4.242L18.364 7.757m-5.121 4.828L7.757 18.364"/></svg>
+                        Top Lead Sources
+                    </h2>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 scroll-container-sm pr-2">
+                        {% for group in top_groups %}
+                        <div class="flex justify-between items-center text-xs font-mono bg-white/5 p-3 rounded-xl border border-white/5 hover:border-auraGold/20 transition-all">
+                            <span class="text-slate-400 truncate max-w-[150px]">{{ group.title }}</span>
+                            <span class="text-auraGold font-bold">{{ group.count }} Leads</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="max-w-7xl mx-auto mt-12 pt-8 border-t border-white/5 text-center text-slate-500 text-sm pb-8">
+        &copy; 2026 Aiden & Aura Bot Systems. Unauthorized access will trigger Handshake Hardening.
+    </footer>
+
+    <!-- Search Results Modal -->
+    <div id="searchModal" class="fixed inset-0 bg-midnight/90 backdrop-blur-xl z-50 hidden p-4 md:p-12 overflow-y-auto">
+        <div class="max-w-5xl mx-auto">
+            <div class="flex justify-between items-center mb-8">
+                <h2 class="text-2xl font-bold text-white font-mono">SEARCH <span class="text-auraGold">RESULTS</span></h2>
+                <button onclick="closeSearch()" class="text-slate-500 hover:text-white transition-colors">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div id="searchResults" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <!-- Dynamic results here -->
+            </div>
+            <div id="noResults" class="text-center py-20 text-slate-500 hidden font-mono">
+                No matching prospects found for your query.
+            </div>
+        </div>
+    </div>
+
+    <!-- Prospect Detail Modal -->
+    <div id="detailModal" class="fixed inset-0 bg-midnight/95 backdrop-blur-2xl z-[60] hidden p-4 md:p-12 overflow-y-auto">
+        <div class="max-w-3xl mx-auto">
+            <div class="flex justify-end mb-4">
+                <button onclick="closeDetails()" class="text-slate-500 hover:text-white transition-colors">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div id="detailContent" class="glass p-8 rounded-3xl border-auraGold/20 gold-glow">
+                <!-- Dynamic content here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Log Viewer Modal -->
+    <div id="logModal" class="fixed inset-0 bg-midnight/95 backdrop-blur-2xl z-[70] hidden p-4 md:p-12 overflow-y-auto">
+        <div class="max-w-5xl mx-auto h-full flex flex-col">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-2xl font-bold text-white font-mono flex items-center gap-3">
+                    <svg class="w-6 h-6 text-auraGold" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                    AURA <span class="text-auraGold">TECH LOGS</span>
+                </h2>
+                <button onclick="closeLogViewer()" class="text-slate-500 hover:text-white transition-colors">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div id="logContent" class="flex-1 bg-black/50 p-6 rounded-2xl border border-white/5 font-mono text-xs text-slate-300 overflow-y-auto whitespace-pre-wrap leading-relaxed">
+                <!-- Dynamic logs here -->
+            </div>
+            <div class="mt-4 flex justify-between items-center">
+                <div class="flex items-center gap-3">
+                    <p class="text-[10px] text-slate-600 font-mono italic">Viewing latest 50 tech handshakes</p>
+                    <div class="w-[1px] h-3 bg-white/10"></div>
+                    <label class="flex items-center gap-2 cursor-pointer group">
+                        <input type="checkbox" id="logAutoScroll" checked class="hidden">
+                        <div class="w-6 h-3 bg-white/5 border border-white/10 rounded-full relative transition-all group-hover:border-auraGold/30">
+                            <div class="dot w-2 h-2 bg-slate-500 rounded-full absolute top-0.5 left-0.5 transition-all"></div>
+                        </div>
+                        <span class="text-[9px] font-bold text-slate-500 uppercase tracking-widest group-hover:text-slate-300 transition-colors">Auto-Scroll</span>
+                    </label>
+                </div>
+                <div class="flex gap-2">
+                    <button onclick="clearBotLogFile()" class="bg-danger/10 hover:bg-danger/20 text-danger px-4 py-2 rounded-lg font-bold text-[10px] uppercase tracking-widest border border-danger/20 transition-all">Clear File</button>
+                    <button onclick="refreshLogs()" class="bg-white/5 hover:bg-white/10 text-auraGold px-6 py-2 rounded-lg font-bold text-[10px] uppercase tracking-widest border border-auraGold/20 transition-all">Refresh Logs</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toastContainer" class="fixed bottom-8 right-8 z-[100] flex flex-col gap-3"></div>
+
+    <script>
+        function switchTab(tabName) {
+            // Hide all tab content
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            // Deactivate all tab buttons
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            // Show selected tab content
+            document.getElementById(`tab-${tabName}`).classList.add('active');
+            // Activate selected tab button
+            document.getElementById(`tab-btn-${tabName}`).classList.add('active');
+            
+            // Re-render charts if necessary (ApexCharts sometimes needs a resize trigger when coming from hidden)
+            window.dispatchEvent(new Event('resize'));
+            
+            // Save last active tab to localStorage
+            localStorage.setItem('auraApexLastTab', tabName);
+        }
+
+        // Restore last active tab on load
+        window.addEventListener('load', () => {
+            const lastTab = localStorage.getItem('auraApexLastTab') || 'overview';
+            switchTab(lastTab);
+        });
+
+        // Set dynamic widths from data attributes
+        document.querySelectorAll('[data-width]').forEach(el => {
+            el.style.width = el.getAttribute('data-width');
+        });
+
+        // Bulk Selection Logic
+        function toggleSelectAll(master) {
+            const checkboxes = document.querySelectorAll('.prospect-checkbox');
+            checkboxes.forEach(cb => cb.checked = master.checked);
+            updateBulkSelection();
+        }
+
+        function updateBulkSelection() {
+            const checkboxes = document.querySelectorAll('.prospect-checkbox:checked');
+            const bar = document.getElementById('bulkActionBar');
+            const count = document.getElementById('selectedCount');
+            
+            if (checkboxes.length > 0) {
+                count.innerText = checkboxes.length;
+                bar.classList.remove('-translate-y-full');
+            } else {
+                bar.classList.add('-translate-y-full');
+                document.getElementById('selectAllProspects').checked = false;
+            }
+        }
+
+        function clearSelection() {
+            const checkboxes = document.querySelectorAll('.prospect-checkbox');
+            checkboxes.forEach(cb => cb.checked = false);
+            document.getElementById('selectAllProspects').checked = false;
+            updateBulkSelection();
+        }
+
+        async function bulkAction(action) {
+            const checkboxes = document.querySelectorAll('.prospect-checkbox:checked');
+            const user_ids = Array.from(checkboxes).map(cb => cb.value);
+            
+            if (!confirm(`Apply ${action} to ${user_ids.length} leads?`)) return;
+            
+            try {
+                const response = await fetch('/api/prospects/bulk', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_ids, action })
+                });
+                const result = await response.json();
+                showToast(result.message);
+                if (result.status === 'ok') {
+                    setTimeout(() => window.location.reload(), 1000);
+                }
+            } catch (err) { showToast('Bulk action failed.', 'error'); }
+        }
+
+        // Search logic
+        async function performSearch() {
+            const query = document.getElementById('prospectSearch').value.trim();
+            if (!query) return;
+            
+            const resultsGrid = document.getElementById('searchResults');
+            const modal = document.getElementById('searchModal');
+            const noResults = document.getElementById('noResults');
+            
+            resultsGrid.innerHTML = '<div class="col-span-2 text-center text-auraGold font-mono">Searching Aura database...</div>';
+            modal.classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+            
+            try {
+                const response = await fetch(`/search?q=${encodeURIComponent(query)}`);
+                const results = await response.json();
+                
+                resultsGrid.innerHTML = '';
+                if (results.length === 0) {
+                    noResults.classList.remove('hidden');
+                } else {
+                    noResults.classList.add('hidden');
+                    results.forEach(res => {
+                        resultsGrid.innerHTML += `
+                            <div class="glass p-6 rounded-2xl border border-white/5 hover:border-auraGold/30 transition-all group">
+                                <div class="flex justify-between items-start mb-4">
+                                    <div>
+                                        <h4 class="text-auraGold font-bold font-mono">@${res.username}</h4>
+                                        <p class="text-xs text-slate-500 font-mono uppercase mt-1">${res.group}</p>
+                                    </div>
+                                    <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest bg-success/20 text-success border border-success/30">
+                                        ${res.status}
+                                    </span>
+                                </div>
+                                <div class="bg-midnight/50 p-4 rounded-xl border border-white/5 mb-4">
+                                    <p class="text-sm text-slate-300 italic">"${res.message}"</p>
+                                </div>
+                                <div class="flex justify-between items-center text-[10px] font-mono text-slate-500 uppercase">
+                                    <span>Time: ${res.time}</span>
+                                    <button onclick="viewDetails('${res.username}')" class="text-auraGold hover:text-white transition-colors">View Profile →</button>
+                                </div>
+                            </div>
+                        `;
+                    });
+                }
+            } catch (err) {
+                resultsGrid.innerHTML = '<div class="col-span-2 text-center text-danger font-mono">Aura Core connection failed.</div>';
+            }
+        }
+
+        async function showToast(message, type = 'success') {
+            const container = document.getElementById('toastContainer');
+            if (!container) return;
+            const toast = document.createElement('div');
+            const colorClass = type === 'success' ? 'bg-success/20 text-success border-success/30' : 'bg-danger/20 text-danger border-danger/30';
+            
+            toast.className = `glass px-6 py-4 rounded-2xl border ${colorClass} gold-glow transition-all duration-500 transform translate-y-10 opacity-0 flex items-center gap-3`;
+            toast.innerHTML = `
+                <span class="status-dot ${type === 'success' ? 'bg-success' : 'bg-danger'}"></span>
+                <span class="font-mono text-sm uppercase tracking-widest font-bold">${message}</span>
+            `;
+            
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.classList.remove('translate-y-10', 'opacity-0');
+            }, 100);
+            
+            setTimeout(() => {
+                toast.classList.add('translate-y-10', 'opacity-0');
+                setTimeout(() => toast.remove(), 500);
+            }, 4000);
+        }
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                showToast(`Copied ${text} to clipboard`);
+            }).catch(err => {
+                showToast('Failed to copy', 'error');
+            });
+        }
+
+        // Log Viewer logic
+        async function openLogViewer() {
+            const modal = document.getElementById('logModal');
+            modal.classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+            await refreshLogs();
+        }
+
+        function closeLogViewer() {
+            document.getElementById('logModal').classList.add('hidden');
+            document.body.style.overflow = 'auto';
+        }
+
+        async function refreshLogs() {
+            const container = document.getElementById('logContent');
+            const autoScroll = document.getElementById('logAutoScroll').checked;
+            try {
+                const response = await fetch('/api/system/logs');
+                const data = await response.json();
+                container.innerText = data.logs.join('\n') || 'No logs available.';
+                if (autoScroll) {
+                    container.scrollTop = container.scrollHeight;
+                }
+            } catch (err) { container.innerText = 'Log capture failed.'; }
+        }
+
+        async function clearBotLogFile() {
+            if (!confirm('Permanently clear all tech logs?')) return;
+            try {
+                const response = await fetch('/api/system/logs/clear', { method: 'POST' });
+                const result = await response.json();
+                showToast(result.message);
+                refreshLogs();
+            } catch (err) { showToast('Action failed.', 'error'); }
+        }
+
+        // Prospect Details & Management
+        async function updateStatus(username, status, optOut = false) {
+            try {
+                const response = await fetch('/api/prospect/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: username, status, opt_out: optOut })
+                });
+                const result = await response.json();
+                showToast(result.message);
+                if (status || optOut) {
+                    setTimeout(() => window.location.reload(), 1000);
+                }
+            } catch (err) { showToast('Update failed.', 'error'); }
+        }
+
+        async function viewDetails(username) {
+            const detailModal = document.getElementById('detailModal');
+            const detailContent = document.getElementById('detailContent');
+            
+            detailContent.innerHTML = '<div class="text-center text-auraGold font-mono animate-pulse">Synchronizing with Handshake Node...</div>';
+            detailModal.classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+            
+            try {
+                const response = await fetch(`/api/prospect/${username.replace('@','')}`);
+                const data = await response.json();
+                
+                if (!data.username) {
+                    detailContent.innerHTML = '<div class="text-center text-slate-500 font-mono">No detailed history found for this prospect.</div>';
+                    return;
+                }
+                
+                detailContent.innerHTML = `
+                    <div class="flex flex-col md:flex-row gap-8">
+                        <div class="flex-shrink-0">
+                            <div class="w-24 h-24 rounded-full bg-auraGold flex items-center justify-center text-midnight text-4xl font-bold font-mono shadow-lg gold-glow">
+                                ${data.username[0].toUpperCase()}
+                            </div>
+                        </div>
+                        <div class="flex-1">
+                            <div class="flex justify-between items-start mb-6">
+                                <div>
+                                    <h2 class="text-3xl font-bold text-white font-mono tracking-tight">@${data.username}</h2>
+                                    <p class="text-auraGold font-mono text-sm uppercase tracking-widest mt-1">${data.source} Profile</p>
+                                </div>
+                                <div class="flex flex-col items-end gap-2">
+                                    <select onchange="updateStatus('${data.username}', this.value)" class="bg-midnight/50 border border-white/10 rounded-lg text-[10px] font-bold uppercase tracking-widest px-2 py-1 text-slate-400 focus:border-auraGold outline-none">
+                                        <option value="">Update Status</option>
+                                        <option value="contacted" ${data.status === 'contacted' ? 'selected' : ''}>Contacted</option>
+                                        <option value="not_contacted" ${data.status === 'not_contacted' ? 'selected' : ''}>Not Contacted</option>
+                                        <option value="converted" ${data.status === 'converted' ? 'selected' : ''}>Converted</option>
+                                        <option value="blacklisted" ${data.status === 'blacklisted' ? 'selected' : ''}>Blacklisted</option>
+                                    </select>
+                                    <span class="px-3 py-1 rounded-full text-[8px] font-bold uppercase bg-white/5 text-slate-400 border border-white/5">
+                                        Current: ${data.status}
+                                    </span>
+                                </div>
+                            </div>
+                            
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+                                <div class="bg-white/5 p-4 rounded-2xl border border-white/5">
+                                    <p class="text-[10px] text-slate-500 uppercase font-bold mb-1">Source Group</p>
+                                    <p class="text-sm text-slate-200 font-mono">${data.group}</p>
+                                </div>
+                                <div class="bg-white/5 p-4 rounded-2xl border border-white/5">
+                                    <p class="text-[10px] text-slate-500 uppercase font-bold mb-1">Outreach Persona</p>
+                                    <p class="text-sm text-slate-200 font-mono">${data.persona}</p>
+                                </div>
+                                <div class="bg-white/5 p-4 rounded-2xl border border-white/5">
+                                    <p class="text-[10px] text-slate-500 uppercase font-bold mb-1">DMs Attempted</p>
+                                    <p class="text-sm text-slate-200 font-mono">${data.responses} Handshakes</p>
+                                </div>
+                                <div class="bg-white/5 p-4 rounded-2xl border border-white/5">
+                                    <p class="text-[10px] text-slate-500 uppercase font-bold mb-1">Discovery Time</p>
+                                    <p class="text-sm text-slate-200 font-mono">${data.time}</p>
+                                </div>
+                            </div>
+                            
+                            <div class="bg-midnight/50 p-6 rounded-2xl border border-white/10 relative">
+                                <p class="text-[10px] text-auraGold uppercase font-bold mb-3 tracking-widest">Initial Intent Message</p>
+                                <p class="text-slate-300 italic text-lg leading-relaxed font-serif">"${data.message}"</p>
+                                <div class="absolute -bottom-3 -right-3 text-auraGold/20">
+                                    <svg class="w-12 h-12" fill="currentColor" viewBox="0 0 24 24"><path d="M14.017 21L14.017 18C14.017 16.8954 14.9124 16 16.017 16H19.017C19.5693 16 20.017 15.5523 20.017 15V9C20.017 8.44772 19.5693 8 19.017 8H16.017C15.4647 8 15.017 8.44772 15.017 9V12C15.017 12.5523 14.5693 13 14.017 13H13.017V21H14.017ZM6.017 21L6.017 18C6.017 16.8954 6.9124 16 8.017 16H11.017C11.5693 16 12.017 15.5523 12.017 15V9C12.017 8.44772 11.5693 8 11.017 8H8.017C7.46472 8 7.017 8.44772 7.017 9V12C7.017 12.5523 6.56932 13 6.017 13H5.017V21H6.017Z"/></svg>
+                                </div>
+                            </div>
+                            <div class="mt-6 flex gap-4">
+                                <button onclick="updateStatus('${data.username}', null, true)" class="flex-1 bg-danger/10 border border-danger/20 text-danger py-3 rounded-xl font-bold uppercase tracking-widest text-[10px] hover:bg-danger/20 transition-all">Mark as Opt-Out / Stop Bot</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } catch (err) {
+                detailContent.innerHTML = '<div class="text-center text-danger font-mono">Handshake synchronization failed.</div>';
+            }
+        }
+
+        function closeDetails() {
+            document.getElementById('detailModal').classList.add('hidden');
+            if (!document.getElementById('searchModal').classList.contains('hidden')) return;
+            document.body.style.overflow = 'auto';
+        }
+
+        async function updateStatus(username, status) {
+            try {
+                const response = await fetch('/api/prospect/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: username.replace('@',''), status: status })
+                });
+                const result = await response.json();
+                if (result.status === 'ok') {
+                    showToast(`Status updated to ${status}`);
+                } else {
+                    showToast('Update failed', 'error');
+                }
+            } catch (err) {
+                showToast('Network error', 'error');
+            }
+        }
+
+        async function switchPerfTab(tab) {
+            const sourcesBtn = document.getElementById('sourcesTabBtn');
+            const keywordsBtn = document.getElementById('keywordsTabBtn');
+            const sourcesList = document.getElementById('sourcesList');
+            const keywordsList = document.getElementById('keywordsList');
+            
+            if (tab === 'sources') {
+                sourcesBtn.classList.add('text-auraGold', 'border-b-2', 'border-auraGold');
+                sourcesBtn.classList.remove('text-slate-500');
+                keywordsBtn.classList.add('text-slate-500');
+                keywordsBtn.classList.remove('text-auraGold', 'border-b-2', 'border-auraGold');
+                sourcesList.classList.remove('hidden');
+                keywordsList.classList.add('hidden');
+            } else {
+                keywordsBtn.classList.add('text-auraGold', 'border-b-2', 'border-auraGold');
+                keywordsBtn.classList.remove('text-slate-500');
+                sourcesBtn.classList.add('text-slate-500');
+                sourcesBtn.classList.remove('text-auraGold', 'border-b-2', 'border-auraGold');
+                keywordsList.classList.remove('hidden');
+                sourcesList.classList.add('hidden');
+                
+                // Fetch keywords if not already loaded
+                try {
+                    const response = await fetch('/api/keywords');
+                    const keywords = await response.json();
+                    let html = '<div class="space-y-4 scroll-container-sm pr-2">';
+                    keywords.forEach(kw => {
+                        html += `
+                            <div class="bg-midnight p-3 rounded-xl border border-white/5 hover:border-auraApexMagenta/20 transition-all">
+                                <div class="flex justify-between items-center">
+                                    <span class="text-sm font-mono text-auraApexMagenta">${kw.term}</span>
+                                    <span class="text-[10px] text-slate-500 font-mono uppercase">Weight: ${kw.weight}</span>
+                                </div>
+                                <div class="mt-2 flex justify-between text-[10px] font-mono text-slate-400">
+                                    <span>Total Hits: ${kw.hits}</span>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    html += '</div>';
+                    keywordsList.innerHTML = html || '<p class="text-center text-slate-500 text-xs py-4">No keywords found.</p>';
+                } catch (err) {
+                    keywordsList.innerHTML = '<p class="text-center text-danger text-xs py-4">Failed to load keywords.</p>';
+                }
+            }
+        }
+
+        function closeSearch() {
+            document.getElementById('searchModal').classList.add('hidden');
+            document.body.style.overflow = 'auto';
+        }
+
+        async function systemAction(type) {
+            if (!confirm(`Are you sure you want to ${type.replace('_', ' ')} the Aura Core?`)) return;
+            
+            try {
+                const response = await fetch('/system/action', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: type })
+                });
+                const result = await response.json();
+                showToast(result.message);
+                if (type === 'restart') {
+                    setTimeout(() => window.location.reload(), 2000);
+                }
+            } catch (err) {
+                showToast('Action failed. Core may be offline.', 'error');
+            }
+        }
+
+        // Activity Trends Chart
+        var options = {
+            series: [{
+                name: 'Prospects Found',
+                data: {{ trends.prospects | tojson }}
+            }, {
+                name: 'Contacted',
+                data: {{ trends.contacted | tojson }}
+            }, {
+                name: 'Responded',
+                data: {{ trends.responded | tojson }}
+            }],
+            chart: {
+                height: 250,
+                type: 'area',
+                background: 'transparent',
+                toolbar: { show: false },
+                fontFamily: 'JetBrains Mono, monospace'
+            },
+            colors: ['#E2E8F0', '#21abe2', '#00E676'],
+            dataLabels: { enabled: false },
+            stroke: { curve: 'smooth', width: 2 },
+            fill: {
+                type: 'gradient',
+                gradient: {
+                    shadeIntensity: 1,
+                    opacityFrom: 0.3,
+                    opacityTo: 0.05,
+                    stops: [0, 90, 100]
+                }
+            },
+            grid: {
+                borderColor: 'rgba(255, 255, 255, 0.05)',
+                xaxis: { lines: { show: true } },
+                yaxis: { lines: { show: true } }
+            },
+            xaxis: {
+                categories: {{ trends.days | tojson }},
+                labels: { style: { colors: '#64748B' } },
+                axisBorder: { show: false },
+                axisTicks: { show: false }
+            },
+            yaxis: {
+                labels: { style: { colors: '#64748B' } }
+            },
+            legend: {
+                position: 'top',
+                horizontalAlign: 'right',
+                labels: { colors: '#E2E8F0' }
+            },
+            tooltip: {
+                theme: 'dark',
+                x: { show: true },
+                marker: { show: true }
+            }
+        };
+
+        var chart = new ApexCharts(document.querySelector("#activityChart"), options);
+        chart.render();
+
+        // Persona Performance Chart
+        var personaOptions = {
+            series: [{
+                name: 'Success Rate',
+                data: {{ persona_stats | map(attribute='rate') | map('replace', '%', '') | map('float') | list | tojson }}
+            }],
+            chart: {
+                height: 250,
+                type: 'bar',
+                background: 'transparent',
+                toolbar: { show: false },
+                fontFamily: 'JetBrains Mono, monospace'
+            },
+            plotOptions: {
+                bar: {
+                    borderRadius: 8,
+                    columnWidth: '40%',
+                    distributed: true,
+                }
+            },
+            colors: ['#FFD700', '#00E676', '#FF5252', '#64748B'],
+            dataLabels: { enabled: false },
+            xaxis: {
+                categories: {{ persona_stats | map(attribute='id') | list | tojson }},
+                labels: { style: { colors: '#64748B' } },
+                axisBorder: { show: false },
+                axisTicks: { show: false }
+            },
+            yaxis: {
+                labels: { 
+                    style: { colors: '#64748B' },
+                    formatter: (val) => val + '%'
+                }
+            },
+            grid: {
+                borderColor: 'rgba(255, 255, 255, 0.05)',
+            },
+            legend: { show: false },
+            tooltip: { theme: 'dark' }
+        };
+
+        var personaChart = new ApexCharts(document.querySelector("#personaChart"), personaOptions);
+        personaChart.render();
+
+        // Niche Segmentation Chart
+        var nicheOptions = {
+            series: {{ niche_dist | map(attribute='value') | list | tojson }},
+            chart: {
+                type: 'donut',
+                height: 250,
+                fontFamily: 'JetBrains Mono, monospace'
+            },
+            labels: {{ niche_dist | map(attribute='name') | list | tojson }},
+            colors: ['#38BDF8', '#EC4899', '#F59E0B', '#FFD700', '#64748B'],
+            stroke: { show: false },
+            legend: {
+                position: 'bottom',
+                labels: { colors: '#E2E8F0' }
+            },
+            dataLabels: { enabled: false },
+            tooltip: { theme: 'dark' }
+        };
+        var nicheChart = new ApexCharts(document.querySelector("#nicheChart"), nicheOptions);
+        nicheChart.render();
+
+        // Activity Heatmap Chart
+        var heatmapOptions = {
+            series: [{
+                name: 'Activity',
+                data: {{ activity_map | tojson }}
+            }],
+            chart: {
+                height: 150,
+                type: 'area',
+                toolbar: { show: false },
+                sparkline: { enabled: true }
+            },
+            colors: ['#F59E0B'],
+            fill: {
+                type: 'gradient',
+                gradient: {
+                    shadeIntensity: 1,
+                    opacityFrom: 0.4,
+                    opacityTo: 0.1,
+                }
+            },
+            stroke: { curve: 'smooth', width: 2 },
+            tooltip: {
+                theme: 'dark',
+                x: {
+                    show: true,
+                    formatter: (val, opts) => (opts.dataPointIndex) + ":00"
+                }
+            }
+        };
+        var heatmapChart = new ApexCharts(document.querySelector("#heatmapChart"), heatmapOptions);
+        heatmapChart.render();
+
+        let currentStatusFilter = 'all';
+        let currentNicheFilter = 'all';
+
+        function filterProspects(status) {
+            currentStatusFilter = status;
+            const buttons = ['all', 'not_contacted', 'contacted'];
+            
+            buttons.forEach(b => {
+                const btn = document.getElementById(`filter-${b}`);
+                if (b === status) {
+                    btn.classList.add('bg-auraGold', 'text-midnight');
+                    btn.classList.remove('text-slate-500', 'hover:text-white');
+                } else {
+                    btn.classList.remove('bg-auraGold', 'text-midnight');
+                    btn.classList.add('text-slate-500', 'hover:text-white');
+                }
+            });
+
+            applyFilters();
+        }
+
+        function filterByNiche(niche) {
+            currentNicheFilter = niche;
+            applyFilters();
+        }
+
+        function applyFilters() {
+            const table = document.getElementById('prospectsTable');
+            const rows = table.querySelectorAll('tbody tr');
+
+            rows.forEach(row => {
+                const rowStatus = row.getAttribute('data-status');
+                const rowNiche = row.getAttribute('data-niche');
+                
+                const statusMatch = currentStatusFilter === 'all' || rowStatus === currentStatusFilter;
+                const nicheMatch = currentNicheFilter === 'all' || rowNiche === currentNicheFilter;
+                
+                row.style.display = (statusMatch && nicheMatch) ? '' : 'none';
+            });
+        }
+
+        // Niche Intelligence logic
+        let rulesData = {};
+        
+        async function loadIntel() {
+            try {
+                const response = await fetch('/api/intel');
+                rulesData = await response.json();
+                renderIntelTags();
+            } catch (err) {}
+        }
+
+        function renderIntelTags() {
+            const category = document.getElementById('intelCategory').value;
+            const container = document.getElementById('intelTags');
+            const rules = rulesData[category] || [];
+            
+            container.innerHTML = rules.length ? '' : '<div class="text-slate-600 text-[10px] font-mono uppercase">No rules in this category.</div>';
+            
+            rules.forEach(rule => {
+                container.innerHTML += `
+                    <div class="flex items-center gap-2 bg-white/5 border border-white/10 px-3 py-1.5 rounded-lg group hover:border-auraGold/30 transition-all">
+                        <span class="text-xs font-mono text-slate-300">${rule}</span>
+                        <button onclick="removeIntelRule('${category}', '${rule}')" class="text-slate-600 hover:text-danger transition-colors">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                        </button>
+                    </div>
+                `;
+            });
+        }
+
+        async function addIntelRule() {
+            const category = document.getElementById('intelCategory').value;
+            const value = document.getElementById('newRuleValue').value.trim();
+            if (!value) return;
+            
+            try {
+                const response = await fetch('/api/intel/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ category, action: 'add', value })
+                });
+                const result = await response.json();
+                if (result.status === 'ok') {
+                    showToast(result.message);
+                    document.getElementById('newRuleValue').value = '';
+                    await loadIntel();
+                }
+            } catch (err) { showToast('Sync failed.', 'error'); }
+        }
+
+        async function removeIntelRule(category, value) {
+            try {
+                const response = await fetch('/api/intel/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ category, action: 'remove', value })
+                });
+                const result = await response.json();
+                if (result.status === 'ok') {
+                    showToast(result.message);
+                    await loadIntel();
+                }
+            } catch (err) { showToast('Sync failed.', 'error'); }
+        }
+
+        document.getElementById('intelCategory').addEventListener('change', renderIntelTags);
+
+        // Blacklist logic
+        async function loadBlacklist() {
+            const container = document.getElementById('blacklistList');
+            try {
+                const response = await fetch('/api/blacklist');
+                const list = await response.json();
+                
+                container.innerHTML = list.length ? '' : '<div class="text-center py-8 text-slate-600 italic text-xs">Blacklist is empty.</div>';
+                
+                list.forEach(id => {
+                    container.innerHTML += `
+                        <div class="flex justify-between items-center bg-white/5 border border-white/5 p-3 rounded-xl hover:bg-white/10 transition-all">
+                            <span class="text-xs font-mono text-auraGold">${id}</span>
+                            <button onclick="removeFromBlacklist('${id}')" class="text-slate-500 hover:text-danger transition-colors p-1">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                            </button>
+                        </div>
+                    `;
+                });
+            } catch (err) {}
+        }
+
+        async function removeFromBlacklist(id) {
+            if (!confirm(`Remove ${id} from blacklist?`)) return;
+            try {
+                const response = await fetch('/api/blacklist/remove', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: id })
+                });
+                const result = await response.json();
+                if (result.status === 'ok') {
+                    showToast(result.message);
+                    await loadBlacklist();
+                }
+            } catch (err) { showToast('Action failed.', 'error'); }
+        }
+
+        // Initial loads
+        loadIntel();
+        loadBlacklist();
+        loadGlobalSettings();
+
+        // Settings logic
+        let currentSettings = {};
+        async function loadGlobalSettings() {
+            try {
+                const response = await fetch('/api/settings');
+                currentSettings = await response.json();
+                
+                document.getElementById('setting-handshake_delay').value = currentSettings.handshake_delay || 60;
+                document.getElementById('setting-daily_dm_limit').value = currentSettings.daily_dm_limit || 50;
+                document.getElementById('setting-scouter_interval').value = currentSettings.scouter_interval || 300;
+                document.getElementById('setting-ui_refresh').value = currentSettings.ui_refresh || 30;
+                updateGhostBtn(currentSettings.ghost_mode);
+            } catch (err) {}
+        }
+
+        function updateGhostBtn(active) {
+            const btn = document.getElementById('ghostToggleBtn');
+            if (active) {
+                btn.className = 'flex items-center gap-3 glass px-4 py-2.5 rounded-xl border border-success/30 text-success font-bold text-xs transition-all';
+                btn.innerHTML = '<div class="w-3 h-3 rounded-full bg-success animate-pulse shadow-[0_0_8px_rgba(0,230,118,0.5)]"></div>GHOST ACTIVE';
+            } else {
+                btn.className = 'flex items-center gap-3 glass px-4 py-2.5 rounded-xl border border-white/10 text-slate-500 font-bold text-xs transition-all';
+                btn.innerHTML = '<div class="w-3 h-3 rounded-full bg-slate-700"></div>GHOST DISABLED';
+            }
+        }
+
+        function toggleGhostMode() {
+            currentSettings.ghost_mode = !currentSettings.ghost_mode;
+            updateGhostBtn(currentSettings.ghost_mode);
+        }
+
+        async function saveGlobalSettings() {
+            const data = {
+                handshake_delay: parseInt(document.getElementById('setting-handshake_delay').value),
+                daily_dm_limit: parseInt(document.getElementById('setting-daily_dm_limit').value),
+                scouter_interval: parseInt(document.getElementById('setting-scouter_interval').value),
+                ui_refresh: parseInt(document.getElementById('setting-ui_refresh').value),
+                ghost_mode: currentSettings.ghost_mode
+            };
+            
+            try {
+                const response = await fetch('/api/settings/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                const result = await response.json();
+                showToast(result.message);
+            } catch (err) { showToast('Sync failed.', 'error'); }
+        }
+
+        // Live log stream updates
+        async function updateLogStream() {
+            try {
+                const response = await fetch('/api/logs');
+                const logs = await response.json();
+                const tbody = document.getElementById('logStreamBody');
+                
+                let html = '';
+                logs.forEach(log => {
+                    const statusClass = log.status === 'PROCEED' ? 'bg-success/20 text-success border border-success/30' : 
+                                      log.status === 'REJECT' ? 'bg-danger/20 text-danger border border-danger/30' : 
+                                      'bg-slate-700/50 text-slate-400 border border-slate-600/30';
+                    html += `
+                        <tr class="hover:bg-white/5 transition-colors">
+                            <td class="px-4 py-3">
+                                <div class="flex justify-between mb-1">
+                                    <span class="font-mono text-auraGold text-[10px]">${log.id}</span>
+                                    <span class="text-slate-500 text-[9px] font-mono">${log.time}</span>
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <span class="px-1.5 py-0.5 rounded-[4px] text-[8px] font-bold uppercase ${statusClass}">
+                                        ${log.status}
+                                    </span>
+                                    <span class="text-slate-400 truncate max-w-[120px]">${log.title}</span>
+                                </div>
+                            </td>
+                        </tr>
+                    `;
+                });
+                tbody.innerHTML = html;
+            } catch (err) {}
+        }
+
+        setInterval(updateLogStream, 5000);
+
+        // Auto-refresh logic
+        let refreshEnabled = true;
+        let refreshTimer;
+
+        function startRefreshTimer() {
+            const interval = (currentSettings.ui_refresh || 30) * 1000;
+            refreshTimer = setTimeout(() => { 
+                if(refreshEnabled) window.location.reload(); 
+            }, interval);
+        }
+
+        // Initial timer start after small delay to ensure settings load
+        setTimeout(startRefreshTimer, 2000);
+
+        function toggleRefresh() {
+            refreshEnabled = !refreshEnabled;
+            const btn = document.getElementById('refreshToggle');
+            const dot = document.getElementById('refreshDot');
+            
+            if (refreshEnabled) {
+                btn.className = 'w-8 h-4 bg-success/20 rounded-full relative transition-all border border-success/30';
+                dot.style.left = '2px';
+                dot.style.backgroundColor = '#00E676';
+                startRefreshTimer();
+            } else {
+                btn.className = 'w-8 h-4 bg-slate-700/50 rounded-full relative transition-all border border-slate-600/30';
+                dot.style.left = '18px';
+                dot.style.backgroundColor = '#64748B';
+                clearTimeout(refreshTimer);
+            }
+        }
+    </script>
+</body>
+</html>
