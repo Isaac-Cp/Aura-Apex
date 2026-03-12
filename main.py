@@ -10,7 +10,7 @@ from aura_core import setup_logging
 setup_logging()
 logger = logging.getLogger("ProcessManager")
 
-SCRIPTS = ["aura_apex_supreme.py", "aura_curator.py", "keep_alive.py"]
+SCRIPTS = ["keep_alive.py", "aura_apex_supreme.py", "aura_curator.py"]
 PROCESSES = {}
 WEB_PROCESS = None
 
@@ -63,6 +63,7 @@ def monitor():
     # Initial start
     for script in SCRIPTS:
         start_process(script)
+        time.sleep(2) # Delay between starts
 
     while True:
         try:
@@ -73,6 +74,7 @@ def monitor():
                     exit_code = p.poll() if p else "None"
                     logger.warning(f"{script} is not running (Exit Code: {exit_code}). Restarting...")
                     start_process(script)
+                    time.sleep(2) # Delay between restarts
             
             time.sleep(10)
         except KeyboardInterrupt:

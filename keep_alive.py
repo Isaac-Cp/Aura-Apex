@@ -1,3 +1,4 @@
+import logging
 from flask import Flask, render_template, request, send_from_directory
 import sqlite3
 import os
@@ -5,12 +6,16 @@ import json
 from datetime import datetime
 import time
 from threading import Thread
-from config import KEEP_ALIVE_SECRET, DB_FILE
+from aura_core import setup_logging
+from config import KEEP_ALIVE_SECRET, DB_FILE, PORT
 
 START_TIME = time.time()
 
+# Configure logging
+setup_logging("keep_alive.log")
+logger = logging.getLogger("KeepAlive")
+
 # Disable Flask startup logs to keep console clean
-import logging
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
@@ -898,11 +903,12 @@ def set_code():
 
 def run():
     try:
-        # Use PORT env var if available, default to 5002
-        port = int(os.environ.get("PORT", 5002))
-        print(f"Starting web server on port {port}...")
-        app.run(host='0.0.0.0', port=port, threaded=True)
+        # Use PORT from config (which defaults to 8080 or env)
+        logger.info(f"Starting web server on port {PORT}...")
+        print(f"Starting web server on port {PORT}...")
+        app.run(host='0.0.0.0', port=PORT, threaded=True)
     except Exception as e:
+        logger.error(f"Web server failed to start: {e}")
         print(f"Web server failed to start: {e}")
 
 def keep_alive():

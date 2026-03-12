@@ -34,7 +34,8 @@ ADMIN_LEADS_CHANNEL_ID = os.getenv("ADMIN_LEADS_CHANNEL_ID")
 DB_FILE = os.getenv("DB_FILE", "gold_leads.db")
 WAITING_FOR_CODE_FILE = "WAITING_FOR_CODE"
 BLACKLIST_FILE = "blacklist.txt"
-KEEP_ALIVE_SECRET = os.getenv("KEEP_ALIVE_SECRET", "changeme")
+KEEP_ALIVE_SECRET = os.getenv("KEEP_ALIVE_SECRET", "change_me")
+PORT = int(os.getenv("PORT", 8080))
 
 # Static fallbacks for initial load, but functions should use get_rules()
 rules = get_rules()

@@ -59,7 +59,7 @@ except Exception:
     psutil = None
 
 # Logging Setup
-setup_logging()
+setup_logging("aura_apex.log")
 logger = logging.getLogger(__name__)
 
 # Pre-compiled Regex for Performance
