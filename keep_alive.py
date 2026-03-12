@@ -673,6 +673,119 @@ def get_keywords():
         pass
     return json.dumps(keywords)
 
+@app.route('/api/keywords/add', methods=['POST'])
+def add_keyword():
+    """Add a new keyword to the tracking database."""
+    try:
+        data = request.get_json() or {}
+        term = data.get('term')
+        weight = data.get('weight', 1)
+        
+        if not term:
+            return json.dumps({"status": "error", "message": "Missing term."}), 400
+            
+        if os.path.exists(DB_FILE):
+            con = sqlite3.connect(DB_FILE)
+            con.execute("PRAGMA journal_mode=WAL;")
+            cur = con.cursor()
+            
+            # Check if keywords table exists
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='keywords'")
+            if not cur.fetchone():
+                cur.execute("CREATE TABLE keywords (term TEXT PRIMARY KEY, weight INTEGER, hits INTEGER DEFAULT 0)")
+            
+            cur.execute("INSERT OR REPLACE INTO keywords (term, weight, hits) VALUES (?, ?, COALESCE((SELECT hits FROM keywords WHERE term=?), 0))", (term, weight, term))
+            con.commit()
+            con.close()
+            return json.dumps({"status": "ok", "message": f"Keyword '{term}' added/updated."})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)}), 500
+    return json.dumps({"status": "error", "message": "DB error."}), 500
+
+@app.route('/api/keywords/delete', methods=['POST'])
+def delete_keyword():
+    """Delete a keyword from tracking."""
+    try:
+        data = request.get_json() or {}
+        term = data.get('term')
+        
+        if not term:
+            return json.dumps({"status": "error", "message": "Missing term."}), 400
+            
+        if os.path.exists(DB_FILE):
+            con = sqlite3.connect(DB_FILE)
+            con.execute("PRAGMA journal_mode=WAL;")
+            cur = con.cursor()
+            cur.execute("DELETE FROM keywords WHERE term = ?", (term,))
+            con.commit()
+            con.close()
+            return json.dumps({"status": "ok", "message": f"Keyword '{term}' deleted."})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)}), 500
+    return json.dumps({"status": "error", "message": "DB error."}), 500
+
+@app.route('/api/tags')
+def get_tags():
+    """Fetch current tracking tags."""
+    tags = []
+    try:
+        if os.path.exists(DB_FILE):
+            con = sqlite3.connect(DB_FILE)
+            con.execute("PRAGMA journal_mode=WAL;")
+            cur = con.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tags'")
+            if cur.fetchone():
+                cur.execute("SELECT name FROM tags ORDER BY name ASC")
+                for r in cur.fetchall():
+                    tags.append(r[0])
+            con.close()
+    except Exception:
+        pass
+    return json.dumps(tags)
+
+@app.route('/api/tags/add', methods=['POST'])
+def add_tag():
+    """Add a new search tag."""
+    try:
+        data = request.get_json() or {}
+        name = data.get('name')
+        if not name:
+            return json.dumps({"status": "error", "message": "Missing name."}), 400
+            
+        if os.path.exists(DB_FILE):
+            con = sqlite3.connect(DB_FILE)
+            con.execute("PRAGMA journal_mode=WAL;")
+            cur = con.cursor()
+            cur.execute("CREATE TABLE IF NOT EXISTS tags (name TEXT PRIMARY KEY)")
+            cur.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (name,))
+            con.commit()
+            con.close()
+            return json.dumps({"status": "ok", "message": f"Tag '{name}' added."})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)}), 500
+    return json.dumps({"status": "error", "message": "DB error."}), 500
+
+@app.route('/api/tags/delete', methods=['POST'])
+def delete_tag():
+    """Delete a search tag."""
+    try:
+        data = request.get_json() or {}
+        name = data.get('name')
+        if not name:
+            return json.dumps({"status": "error", "message": "Missing name."}), 400
+            
+        if os.path.exists(DB_FILE):
+            con = sqlite3.connect(DB_FILE)
+            con.execute("PRAGMA journal_mode=WAL;")
+            cur = con.cursor()
+            cur.execute("DELETE FROM tags WHERE name = ?", (name,))
+            con.commit()
+            con.close()
+            return json.dumps({"status": "ok", "message": f"Tag '{name}' deleted."})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)}), 500
+    return json.dumps({"status": "error", "message": "DB error."}), 500
+
 @app.route('/search')
 def search():
     query = request.args.get('q', '').strip().lower()
