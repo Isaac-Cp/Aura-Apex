@@ -17,9 +17,12 @@ log.setLevel(logging.ERROR)
 app = Flask(__name__)
 
 @app.route('/logo.jpg')
+@app.route('/favicon.ico')
 def serve_logo():
     """Serve the official Aura Apex branding logo."""
-    return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "6039744640304483712.jpg")
+    response = send_from_directory(os.path.dirname(os.path.abspath(__file__)), "6039744640304483712.jpg")
+    response.headers['Cache-Control'] = 'public, max-age=3600'
+    return response
 
 def get_stats():
     """Fetch real-time stats from the database."""
