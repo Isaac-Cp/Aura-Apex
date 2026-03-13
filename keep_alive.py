@@ -42,7 +42,7 @@ def get_stats():
         if not os.path.exists(DB_FILE):
             return stats
             
-        con = sqlite3.connect(DB_FILE)
+        con = sqlite3.connect(DB_FILE, check_same_thread=False)
         con.execute("PRAGMA journal_mode=WAL;")
         cur = con.cursor()
         
@@ -78,7 +78,7 @@ def get_activity_trends():
     try:
         if not os.path.exists(DB_FILE):
             return trends
-        con = sqlite3.connect(DB_FILE)
+        con = sqlite3.connect(DB_FILE, check_same_thread=False)
         con.execute("PRAGMA journal_mode=WAL;")
         cur = con.cursor()
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='activity_rollup'")
@@ -101,7 +101,7 @@ def get_recent_prospects():
     try:
         if not os.path.exists(DB_FILE):
             return prospects
-        con = sqlite3.connect(DB_FILE)
+        con = sqlite3.connect(DB_FILE, check_same_thread=False)
         con.execute("PRAGMA journal_mode=WAL;")
         cur = con.cursor()
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='prospects'")
@@ -148,7 +148,7 @@ def get_recent_logs():
         if not os.path.exists(DB_FILE):
             return logs
             
-        con = sqlite3.connect(DB_FILE)
+        con = sqlite3.connect(DB_FILE, check_same_thread=False)
         con.execute("PRAGMA journal_mode=WAL;")
         cur = con.cursor()
         
@@ -176,7 +176,7 @@ def get_source_kpis():
         if not os.path.exists(DB_FILE):
             return kpis
             
-        con = sqlite3.connect(DB_FILE)
+        con = sqlite3.connect(DB_FILE, check_same_thread=False)
         con.execute("PRAGMA journal_mode=WAL;")
         cur = con.cursor()
         
@@ -203,7 +203,7 @@ def get_potential_targets():
         if not os.path.exists(DB_FILE):
             return targets
             
-        con = sqlite3.connect(DB_FILE)
+        con = sqlite3.connect(DB_FILE, check_same_thread=False)
         con.execute("PRAGMA journal_mode=WAL;")
         cur = con.cursor()
         
@@ -237,7 +237,7 @@ def get_top_groups():
     groups = []
     try:
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='prospects'")
@@ -255,7 +255,7 @@ def get_persona_stats():
     stats = []
     try:
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             cur.execute("""
@@ -287,7 +287,7 @@ def get_outreach_queue():
     queue = []
     try:
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             cur.execute("""
@@ -312,7 +312,7 @@ def get_niche_distribution():
     dist = {}
     try:
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='prospects'")
@@ -336,7 +336,7 @@ def get_activity_heatmap():
     heatmap = [0] * 24
     try:
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='prospects'")
@@ -358,7 +358,7 @@ def get_lead_velocity():
     """Calculate lead capture velocity (leads per hour last 24h)."""
     try:
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='prospects'")
@@ -448,7 +448,7 @@ def bulk_prospect_action():
             return json.dumps({"status": "error", "message": "Missing IDs or action."}), 400
             
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             
@@ -480,7 +480,7 @@ def update_prospect_status():
             return json.dumps({"status": "error", "message": "Missing user ID."}), 400
             
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             
@@ -503,7 +503,8 @@ def get_intel():
     if os.path.exists(RULES_PATH):
         try:
             with open(RULES_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                return json.dumps(data) # Explicitly return JSON string
         except Exception:
             pass
     return json.dumps({})
@@ -608,7 +609,7 @@ def get_prospect_details(user_id):
     details = {}
     try:
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             cur.execute("""
@@ -645,7 +646,7 @@ def export_prospects():
     
     try:
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             cur.execute("SELECT user_id, username, group_title, status, message, message_ts, source FROM prospects")
@@ -665,7 +666,7 @@ def get_keywords():
     keywords = []
     try:
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='keywords'")
@@ -690,7 +691,7 @@ def add_keyword():
             return json.dumps({"status": "error", "message": "Missing term."}), 400
             
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             
@@ -718,7 +719,7 @@ def delete_keyword():
             return json.dumps({"status": "error", "message": "Missing term."}), 400
             
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             cur.execute("DELETE FROM keywords WHERE term = ?", (term,))
@@ -735,7 +736,7 @@ def get_tags():
     tags = []
     try:
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tags'")
@@ -758,7 +759,7 @@ def add_tag():
             return json.dumps({"status": "error", "message": "Missing name."}), 400
             
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             cur.execute("CREATE TABLE IF NOT EXISTS tags (name TEXT PRIMARY KEY)")
@@ -780,7 +781,7 @@ def delete_tag():
             return json.dumps({"status": "error", "message": "Missing name."}), 400
             
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             cur.execute("DELETE FROM tags WHERE name = ?", (name,))
@@ -797,7 +798,7 @@ def search():
     results = []
     try:
         if os.path.exists(DB_FILE):
-            con = sqlite3.connect(DB_FILE)
+            con = sqlite3.connect(DB_FILE, check_same_thread=False)
             con.execute("PRAGMA journal_mode=WAL;")
             cur = con.cursor()
             if query:
@@ -845,7 +846,7 @@ def system_action():
             
         elif action == 'clear_cache':
             if os.path.exists(DB_FILE):
-                con = sqlite3.connect(DB_FILE)
+                con = sqlite3.connect(DB_FILE, check_same_thread=False)
                 con.execute("PRAGMA journal_mode=WAL;")
                 cur = con.cursor()
                 # Just clear the entity cache table as an example
@@ -856,7 +857,7 @@ def system_action():
                 
         elif action == 'clear_db_logs':
             if os.path.exists(DB_FILE):
-                con = sqlite3.connect(DB_FILE)
+                con = sqlite3.connect(DB_FILE, check_same_thread=False)
                 con.execute("PRAGMA journal_mode=WAL;")
                 cur = con.cursor()
                 # Clear join_attempts table
