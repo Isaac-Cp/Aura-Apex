@@ -1217,6 +1217,8 @@ def ensure_spintax_variation(text, last_text=None):
 apex_supreme_stats = {
     "rich_joined": 0,
     "unique_dms": 0,
+    "dm_initiated_today": 0,
+    "last_reset_date": str(datetime.now().date()),
     "spam_shielded": 0,
     "bots_queried": 0,
     "tier_1_leads": 0,
@@ -3303,6 +3305,15 @@ async def handshake_processor():
     logger.info("Handshake Processor Task Started.")
     while True:
         try:
+            # Daily reset for dm_initiated_today
+            stats = await load_json_async(STATS_FILE, apex_supreme_stats)
+            now_date = str(datetime.now().date())
+            if stats.get("last_reset_date") != now_date:
+                stats["dm_initiated_today"] = 0
+                stats["last_reset_date"] = now_date
+                await save_json_async(STATS_FILE, stats)
+                logger.info(f"Daily DM reset performed. New day: {now_date}")
+
             # Sync with database for existing leads not in queue
             logger.info("Syncing prospects from DB...")
             async with aiosqlite.connect(DB_FILE) as db:
@@ -3362,6 +3373,8 @@ async def handshake_processor():
                             tz = _market_tzinfo()
                             h = datetime.now(tz).hour
                             logger.info(f"Skipping DM to {u} (Outside human hours: {h}:00 in {tz.key}).")
+                            # PERSISTENCE FIX: If we skip due to hours, keep it in the DB as 'not_contacted'
+                            # but remove from current runtime queue so it doesn't loop infinitely now.
                             continue
                         stats = await load_json_async(STATS_FILE, apex_supreme_stats)
                         dm_today = stats.get("dm_initiated_today", 0)
@@ -3409,13 +3422,23 @@ async def handshake_processor():
                             # For quality gate, we still need full user info
                             fu = await client(GetFullUserRequest(user_obj))
                             uname = getattr(user_obj, "username", None) or cached_username
-                            # RELAXATION: Even if no username, if we have a valid user object from cache/ID, try to DM
-                            if not uname and os.environ.get("AURA_MODE", "").lower() != "testing":
+                            lead_score = 0
+                            try:
+                                lead_score = calculate_lead_score(snippet or "", None)
+                            except Exception:
+                                pass
+
+                            # RELAXATION: Even if no username, if high intent (score >= 10), allow outreach
+                            is_high_intent = (lead_score >= 10)
+                            
+                            if not uname and os.environ.get("AURA_MODE", "").lower() != "testing" and not is_high_intent:
                                 logger.info(f"Skipping DM to {u} (no username).")
+                                update_prospect_status(u, "no_username")
                                 continue
                             lead_premium = bool(getattr(user_obj, "premium", False))
                         except (UserPrivacyRestrictedError, PeerIdInvalidError) as e:
                             logger.info(f"Skipping DM to {u} (privacy or invalid peer): {e}")
+                            update_prospect_status(u, "privacy_restricted")
                             continue
                         except Exception as e:
                             # Final resolution attempt if previous failed
@@ -3432,8 +3455,11 @@ async def handshake_processor():
                             else:
                                 logger.error(f"Resolution error for {u}: {e}")
                                 continue
-                        if not quality_gate(fu):
+
+                        if not quality_gate(fu, high_intent=is_high_intent):
                             logger.info(f"Skipping DM to {u} (Failed Quality Gate: No photo or long offline).")
+                            # Mark as 'failed_quality' in DB so we don't keep trying this specific message
+                            update_prospect_status(u, "failed_quality")
                             continue
                         social_hint = ""
                         try:
@@ -3453,12 +3479,6 @@ async def handshake_processor():
                         dm_text = None
                         persona_id = await get_prospect_persona(u, chat_id) or choose_persona_id(group_title)
                         try:
-                            lead_score = 0
-                            try:
-                                lead_score = calculate_lead_score(snippet or "", None)
-                            except Exception:
-                                pass
-                            
                             # AI Optimization: Only use LLM for high-value leads (score >= 8)
                             if ai_client and lead_score >= 8:
                                 # Aiden V2 Outreach Strategy: Pass username and message timestamp
@@ -3565,7 +3585,7 @@ async def activate_deep_sleep(seconds: int):
 
 def outreach_deep_sleep() -> bool:
     return time.time() < _deep_sleep_until
-def quality_gate(full_user):
+def quality_gate(full_user, high_intent=False):
     try:
         usr = getattr(full_user, "user", None)
         fu = getattr(full_user, "full_user", None)
@@ -3578,7 +3598,11 @@ def quality_gate(full_user):
         if os.environ.get("AURA_MODE", "").lower() == "testing":
             return True
             
-        # 3. Photo Check
+        # 3. High Intent Bypass: Allow if message is definitely about IPTV service
+        if high_intent:
+            return True
+
+        # 4. Photo Check
         photo = False
         try:
             photo = bool(getattr(usr, "photo", None) or getattr(fu, "profile_photo", None))
