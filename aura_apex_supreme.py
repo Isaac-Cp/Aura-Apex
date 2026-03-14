@@ -3478,7 +3478,7 @@ async def handshake_processor():
                         await typing_heartbeat(u, random.uniform(6, 9))
                         dm_text = None
                         persona_id = await get_prospect_persona(u, chat_id) or choose_persona_id(group_title)
-                        try:
+                         try:
                             # AI Optimization: Only use LLM for high-value leads (score >= 8)
                             if ai_client and lead_score >= 8:
                                 # Aiden V2 Outreach Strategy: Pass username and message timestamp

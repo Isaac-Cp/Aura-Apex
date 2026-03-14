@@ -577,23 +577,23 @@ def generate_4k_image(title: str, concept_text: str = "") -> Optional[bytes]:
 
 async def _build_image_prompt(title: str, body: str, topic: str) -> str:
     try:
-        # Strict high-fidelity style
-        base_style = "cinematic lighting, 8k resolution, photorealistic, octane render, unreal engine 5, highly detailed, sharp focus"
+        # Tech-Graphic / Abstract Digital Art style
+        base_style = "isometric 3D digital illustration, clean lines, minimalist, flat design, vector art, high contrast, studio lighting, octane render, 8k"
         
         if not ai_client:
-            return f"A visually stunning concept art representing '{title}', {base_style}, no text"
+            return f"A clean digital illustration representing '{title}', {base_style}"
 
         sys_prompt = (
             "You are an expert prompt engineer for Stable Diffusion XL. "
-            "Create a HIGHLY SPECIFIC, LITERAL visual description of the subject matter. "
-            "Do NOT use generic 'tech' backgrounds unless the topic is abstract. "
-            "If the topic is about a Firestick, describe a Firestick. "
-            "If it's about a specific app, describe its logo style or interface abstractly (but NO TEXT). "
-            "If it's about a server raid, describe police lights and server racks. "
-            "Focus on: ACTION, OBJECTS, SPECIFIC DETAILS. "
-            "Forbidden: Text, letters, words, UI overlays, generic 'cyberpunk' filler. "
-            "Style: Cinematic, photorealistic, dramatic. "
-            "Keep it under 70 words."
+            "Create a clean, 3D ISOMETRIC DIGITAL ILLUSTRATION of the subject matter. "
+            "Do NOT generate photorealistic people or real-life photos. "
+            "Use a minimalist, modern tech aesthetic (like Stripe or Apple-style illustrations). "
+            "Focus on: ICONIC OBJECTS, CLEAN SURFACES, and VIBRANT COLORS. "
+            "If it's about a Firestick, show a stylized 3D Firestick icon. "
+            "If it's about a server, show a stylized 3D server rack. "
+            "Forbidden: Real photos, photorealism, human faces, text, letters, blurry backgrounds. "
+            "Style: Isometric, 3D render, minimalist, high-quality digital art. "
+            "Keep it under 60 words."
         )
         
         user_prompt = f"Title: {title}\nContext: {body[:250]}\nTask: Write a precise visual art prompt that depicts exactly what this news is about."
